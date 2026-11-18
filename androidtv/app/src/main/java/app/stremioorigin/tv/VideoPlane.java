@@ -92,6 +92,7 @@ public final class VideoPlane {
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> applyPlace());
 
         selector = new DefaultTrackSelector(a);
+        if (keptParams != null) { selector.setParameters(keptParams); keptParams = null; } /* (the film's own track choices, kept over a release in the background) */
         selector.setParameters(selector.buildUponParameters().setPreferredAudioLanguage(null).setTunnelingEnabled(false)
             .setAllowInvalidateSelectionsOnRendererCapabilitiesChange(true));   /* a receiver switched on mid-film: passthrough taken again */
         /* Settings › Audio › DTS sound: Auto = the box's decoders (or passthrough) first, FFmpeg after; Convert = FFmpeg first
@@ -227,6 +228,7 @@ public final class VideoPlane {
 
     /* ---- calls from the native side (any thread) ---- */
     public static void load(final String url, final long startMs, final boolean isLive) {
+        lastUrl = url; freed = false;
         droppedFilm = 0; state = 1; firstFrame = 0; hasMedia = 1; error = ""; hdr = ""; vw = vh = 0; pos = startMs; dur = 0; buf = 0; unsup = 0; seeking = 0; changed = 1;
         audioLines = ""; textLines = ""; audioCur = -1; wantPlay = true; live = isLive;
         MainActivity.keepScreen(true);
@@ -335,6 +337,25 @@ public final class VideoPlane {
     }
 
     /* the activity leaves (Home, another app): the film pauses where it is */
+    /* a box with little memory: the player let go while the app is not seen (its decoder and buffers are what Android
+       kills the app for in the background; Google's TV memory rule), the film brought back at the same place, paused, with
+       its tracks, when the app is seen again. What the app reads (state, place) stays as it was meanwhile */
+    private static String lastUrl; private static boolean freed; private static long freedPos; private static DefaultTrackSelector.Parameters keptParams;
+    private static boolean smallBox() { try { android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); MainActivity a = MainActivity.self;
+            ((android.app.ActivityManager) a.getSystemService(android.content.Context.ACTIVITY_SERVICE)).getMemoryInfo(mi); return mi.totalMem > 0 && mi.totalMem < 2300L * 1024 * 1024; } catch (Throwable t) { return false; } }
+    static void onStop() { run(() -> {
+        if (player == null || hasMedia != 1 || lastUrl == null || !smallBox()) return;
+        freedPos = Math.max(0, player.getCurrentPosition()); keptParams = selector != null ? selector.getParameters() : null; freed = true;
+        MainActivity.log("[video] the app is not seen: the player let go (a small box), the film kept at " + freedPos / 1000 + " s");
+        player.release(); player = null;
+        ViewGroup root = MainActivity.layout(); if (root != null) { if (box != null) root.removeView(box); if (subs != null) root.removeView(subs); } box = null; view = null; subs = null; }); }
+    static void onStart() { run(() -> {
+        if (!freed || lastUrl == null) return; freed = false; final String u = lastUrl; final long at = freedPos; final boolean lv = live;
+        MainActivity.log("[video] the app is seen again: the film loaded back at " + at / 1000 + " s, paused");
+        ensure(); if (player == null) return;
+        MediaItem.Builder b = new MediaItem.Builder().setUri(Uri.parse(u)); if (lv) b.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().build());
+        player.setVolume(volTarget / 100f); if (at > 0 && !lv) player.setMediaItem(b.build(), at); else player.setMediaItem(b.build());
+        wantPlay = false; player.setPlayWhenReady(false); player.prepare(); cues(java.util.Collections.emptyList()); }); }
     static void onPause() { run(() -> { if (player != null && player.isPlaying()) { player.pause(); } }); }
     static void release() { run(() -> { if (player != null) { player.release(); player = null; }
         ViewGroup root = MainActivity.layout(); if (root != null) { if (box != null) root.removeView(box); if (subs != null) root.removeView(subs); } box = null; view = null; subs = null; }); }

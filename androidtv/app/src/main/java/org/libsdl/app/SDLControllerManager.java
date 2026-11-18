@@ -640,8 +640,8 @@ class SDLGenericMotionListener_API12 implements View.OnGenericMotionListener {
                         return true;
 
                     case MotionEvent.ACTION_HOVER_MOVE:
-                        x = event.getX(0);
-                        y = event.getY(0);
+                        x = event.getX(0) * SDLActivity.mPtrSX;
+                        y = event.getY(0) * SDLActivity.mPtrSY;
 
                         SDLActivity.onNativeMouse(0, action, x, y, false);
                         return true;
@@ -771,8 +771,8 @@ class SDLGenericMotionListener_API26 extends SDLGenericMotionListener_API24 {
                         return true;
 
                     case MotionEvent.ACTION_HOVER_MOVE:
-                        x = event.getX(0);
-                        y = event.getY(0);
+                        x = event.getX(0) * SDLActivity.mPtrSX;
+                        y = event.getY(0) * SDLActivity.mPtrSY;
                         SDLActivity.onNativeMouse(0, action, x, y, false);
                         return true;
 

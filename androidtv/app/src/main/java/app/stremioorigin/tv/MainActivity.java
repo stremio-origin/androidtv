@@ -58,7 +58,18 @@ public class MainActivity extends SDLActivity {
         usbWatch();
         /* the app's drawing over the video plane: clear where the picture shows */
         if (mSurface != null) { mSurface.setZOrderMediaOverlay(true); mSurface.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT); }
+        /* the drawing surface's size, fixed before SDL makes its surface (set later, the app had already drawn at the old
+           size): 1280x720 on a box found weak (the app's own measure of this GPU, kept in data/drawsize, or under 1.5 GB of
+           memory), the TV's display hardware scaling it to the screen for nothing; else 1920x1080 (a 4K screen scales that) */
+        { int lines = drawLines(); if (mSurface != null) { mSurface.getHolder().setFixedSize(lines * 16 / 9, lines);
+            /* (SDL adds its view sized to its content: with a fixed buffer smaller than the screen the view itself shrank to it,
+               in the top-left corner. Filling the screen, the compositor scales the buffer to the whole view) */
+            mSurface.setLayoutParams(new android.widget.RelativeLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT)); } log("[start] drawing surface " + (lines * 16 / 9) + "x" + lines + " (Java)"); }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        /* a video app, never a game: the TV keeps its picture mode (a window asking for minimal post-processing makes Android
+           send the TV ALLM / Game Content Type over HDMI, and the TV switches to Game mode; asked off here, and the manifest
+           says appCategory video for TVs that decide by the app's category) */
+        if (Build.VERSION.SDK_INT >= 30) { try { getWindow().setPreferMinimalPostProcessing(false); } catch (Throwable t) { } }
         try {   /* the phone finds the TV app by a broadcast on the network: Wi-Fi drops them without this */
             WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (wm != null) { mcLock = wm.createMulticastLock("origin-cast"); mcLock.setReferenceCounted(false); mcLock.acquire(); }
@@ -67,6 +78,8 @@ public class MainActivity extends SDLActivity {
 
     @Override
     protected void onPause() { inFront = false; VideoPlane.onPause(); super.onPause(); }
+    @Override protected void onStop() { VideoPlane.onStop(); super.onStop(); }
+    @Override protected void onStart() { super.onStart(); VideoPlane.onStart(); }
     static volatile boolean inFront;
     /* back in front after the system's install screen with no answer from it (cancelled, or Android 5's "Install blocked"
        closed: no status comes then): the update is not stuck as installing, it can be tried again */
@@ -436,6 +449,25 @@ public class MainActivity extends SDLActivity {
             out[4] = (byte) bh; out[5] = (byte) (bh >> 8); out[6] = (byte) (bh >> 16); out[7] = (byte) (bh >> 24);
             return out;
         } catch (Throwable t) { return null; }
+    }
+    /* the app started again (the GPU state was lost while it was away): opened anew a moment after this process ends */
+    public static void restartApp(int unused) {
+        final MainActivity a = self; if (a == null) return;
+        a.runOnUiThread(() -> {
+            /* started while the app is still in front (Android 10+ refuses activity starts from the background, so an alarm
+               after the process ended did not reopen it), then this process ends; the new task opens the app afresh */
+            try { a.startActivity(android.content.Intent.makeRestartActivityTask(a.getComponentName())); } catch (Throwable t) { }
+            android.os.Process.killProcess(android.os.Process.myPid());
+        });
+    }
+    /* SB_RES (development) first, then what the app measured on this box last time, then the box's memory */
+    private int drawLines() {
+        try { String r = android.system.Os.getenv("SB_RES"); if (r != null) return r.equals("720") ? 720 : 1080; } catch (Throwable t) { }
+        try { File f = new File(getFilesDir(), "data/drawsize"); if (f.exists()) { byte[] b = new byte[64]; int n; try (FileInputStream in = new FileInputStream(f)) { n = in.read(b); }
+                String v = n > 0 ? new String(b, 0, n).trim() : ""; if (v.startsWith("720")) return 720; if (v.startsWith("1080")) return 1080; } } catch (Throwable t) { }
+        try { ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(mi);
+            if (mi.totalMem > 0 && mi.totalMem < 1500L * 1024 * 1024) return 720; } catch (Throwable t) { }
+        return 1080;
     }
     /* the drawing surface's size, fixed (the TV scales it to the screen): 1080 or 720 lines (src: plat_window_size) */
     public static void surfaceSize(int lines) {

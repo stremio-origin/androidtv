@@ -418,7 +418,9 @@ typedef struct { NetHdrSink hs; NetSink sink; void *ud; int stopped; } PipeCtx;
 static size_t pipe_hdr(char *p, size_t s, size_t n, void *ud) { PipeCtx *x = ud; size_t l = s * n; char line[1024]; size_t k = l < sizeof line - 1 ? l : sizeof line - 1; memcpy(line, p, k); line[k] = 0; x->hs(line, x->ud); return l; }
 static size_t pipe_data(char *p, size_t s, size_t n, void *ud) { PipeCtx *x = ud; if (!x->sink((const unsigned char *)p, s * n, x->ud)) { x->stopped = 1; return 0; } return s * n; }
 static int pipe_poll(void *ud, curl_off_t a, curl_off_t b, curl_off_t c, curl_off_t d) { (void)a; (void)b; (void)c; (void)d; PipeCtx *x = ud; if (!x->sink(NULL, 0, x->ud)) { x->stopped = 1; return 1; } return 0; }
-int net_pipe_sync(const char *url, const char *headers, int head, NetHdrSink hs, NetSink sink, void *ud, int stallSec) {
+int net_pipe_sync(const char *url, const char *headers, int head, NetHdrSink hs, NetSink sink, void *ud, int stallSec) { return net_pipe_sync_ct(url, headers, head, hs, sink, ud, stallSec, 10000); }
+/* the same with its own connect time (a live channel's check: 3 s, so one server that hangs does not use the whole search) */
+int net_pipe_sync_ct(const char *url, const char *headers, int head, NetHdrSink hs, NetSink sink, void *ud, int stallSec, long connectMs) {
   if (!f_easy_init && !resolve()) return 0;
   CURL *c = f_easy_init(); if (!c) return 0;
   PipeCtx x = { hs, sink, ud, 0 }; struct curl_slist *sl = NULL;
@@ -427,7 +429,7 @@ int net_pipe_sync(const char *url, const char *headers, int head, NetHdrSink hs,
   f_easy_setopt(c, CURLOPT_WRITEFUNCTION, pipe_data); f_easy_setopt(c, CURLOPT_WRITEDATA, &x);
   f_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, pipe_poll); f_easy_setopt(c, CURLOPT_XFERINFODATA, &x); f_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
   f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 8L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-  f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 10000L); f_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L); f_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, (long)(stallSec > 0 ? stallSec : 60));
+  f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, connectMs > 0 ? connectMs : 10000L); f_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L); f_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, (long)(stallSec > 0 ? stallSec : 60));
   f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); /* a User-Agent among the headers replaces it */
   if (head) f_easy_setopt(c, CURLOPT_NOBODY, 1L);
   if (sl) f_easy_setopt(c, CURLOPT_HTTPHEADER, sl);
@@ -507,7 +509,7 @@ static size_t multi_hdr(char *p, size_t s, size_t n, void *ud) { MultiCtx *m = u
   int code; if (sscanf(line, "HTTP/%*s %d", &code) == 1) { m->status = code; m->ctype[0] = 0; m->len = 0; }
   else if (!strncasecmp(line, "content-type:", 13)) { char *v = line + 13; while (*v == ' ') v++; size_t vl = strcspn(v, "\r\n"); if (vl >= sizeof m->ctype) vl = sizeof m->ctype - 1; memcpy(m->ctype, v, vl); m->ctype[vl] = 0; }
   return l; }
-static size_t multi_data(char *p, size_t s, size_t n, void *ud) { MultiCtx *m = ud; size_t add = s * n; if (m->status != 206) return add; if (m->len + (long)add > m->max) return 0;
+static size_t multi_data(char *p, size_t s, size_t n, void *ud) { MultiCtx *m = ud; size_t add = s * n; if (m->status == 200) return 0; /* (the whole file instead of the ranges: stopped at once, it was read until the time ran out) */ if (m->status != 206) return add; if (m->len + (long)add > m->max) return 0;
   if (m->len + (long)add > m->cap) { long nc = (m->len + (long)add) * 2; if (nc > m->max) nc = m->max; unsigned char *q = realloc(m->buf, nc); if (!q) return 0; m->buf = q; m->cap = nc; } memcpy(m->buf + m->len, p, add); m->len += add; return add; }
 static unsigned char *mem_find(unsigned char *h, long hn, const char *nd, long nn) { for (long i = 0; i + nn <= hn; i++) if (h[i] == (unsigned char)nd[0] && !memcmp(h + i, nd, nn)) return h + i; return NULL; }
 int net_range_multi(NetRange *h, const char *url, const long long *st, const long *ln, int n, unsigned char **parts, long *plen, int *httpStatus, int timeoutMs) {
@@ -522,7 +524,7 @@ int net_range_multi(NetRange *h, const char *url, const long long *st, const lon
     f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); f_easy_setopt(c, CURLOPT_TCP_KEEPALIVE, 1L); if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
     CURLcode rc = f_easy_perform(c); if (pin) { f_easy_setopt(c, CURLOPT_RESOLVE, (struct curl_slist *)NULL); f_slist_free_all(pin); }
     if (httpStatus) *httpStatus = m.status;
-    if (direct && !pass && (rc != CURLE_OK || (m.status >= 400 && m.status != 416 && m.status != 429))) { free(m.buf); led_drop(url); free(h->eff); h->eff = NULL; direct = 0; continue; } /* (where the link led stopped answering: through the link again) */
+    if (direct && !pass && ((rc != CURLE_OK && !(rc == CURLE_WRITE_ERROR && m.status == 200)) || (m.status >= 400 && m.status != 416 && m.status != 429))) { free(m.buf); led_drop(url); free(h->eff); h->eff = NULL; direct = 0; continue; } /* (where the link led stopped answering: through the link again) */
     if (m.status == 429 || m.status == 503) { free(m.buf); free(rg); return NR_BUSY; }
     if (rc == CURLE_OPERATION_TIMEDOUT) { free(m.buf); free(rg); return NR_TIMEOUT; }
     if (rc != CURLE_OK && !(rc == CURLE_WRITE_ERROR && m.status != 206)) { free(m.buf); free(rg); return NR_NET; }

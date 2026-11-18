@@ -28,13 +28,13 @@ static const char *tv_name(void) { return plat_device_name(); }
 static void on_live_fail(const char *id, const char *code, int back) { if (!cast_phones()) return; fprintf(stderr, "[cast] channel %s did not play (%s)%s: phones told\n", id, code, back ? ", the one before plays on" : "");
   cast_error(T("This channel isn't broadcasting right now"), code, id, back); }
 static void on_play(const CastPlay *p) {
-  app_activity();
+  app_activity(); app_overlay_close(); /* (the guide or a card open: closed, the film is not hidden behind it) */
   snprintf(castTitle, sizeof castTitle, "%s", p->title);
   if (live_type(p->type) && *p->id) { /* a channel from a phone: started as one picked here (its own stream found, the channel player, Up / Down along its line-up) */
     Item it; memset(&it, 0, sizeof it); snprintf(it.type, sizeof it.type, "%s", p->type); snprintf(it.id, sizeof it.id, "%s", p->id); snprintf(it.name, sizeof it.name, "%s", p->title); snprintf(it.poster, sizeof it.poster, "%s", p->poster); snprintf(it.logo, sizeof it.logo, "%s", p->logo);
     char ty[16], pid[96], pv[96]; player_cast_ident(ty, sizeof ty, pid, sizeof pid, pv, sizeof pv); live_start(&it, NULL, 0, player_open() && live_type(ty)); return; } /* (a channel already on: switched in its player, as Up / Down) */
   Stream s; memset(&s, 0, sizeof s); snprintf(s.url, sizeof s.url, "%s", p->url); snprintf(s.name, sizeof s.name, "%s", p->title); snprintf(s.title, sizeof s.title, "%s", p->title);
-  const char *type = *p->type ? p->type : "movie", *id = *p->id ? p->id : "cast"; char vid[96];
+  const char *type = *p->type ? p->type : "movie", *id = *p->id ? p->id : "cast"; char vid[SB_VID];
   if (!strcmp(type, "series") && p->season > 0) snprintf(vid, sizeof vid, "%s:%d:%d", id, p->season, p->episode); else snprintf(vid, sizeof vid, "%s", id);
   const char *urls[16], *langs[16]; for (int i = 0; i < p->nsubs && i < 16; i++) { urls[i] = p->subs[i].url; langs[i] = p->subs[i].lang; }
   player_next_subs(urls, langs, p->nsubs); player_next_art(p->title, p->poster, p->background, p->logo);
@@ -43,9 +43,9 @@ static void on_play(const CastPlay *p) {
 /* the phone names a title and this TV finds its stream (its own best-stream choice, as with best stream on here): the
    title's pictures at once, "choosing" told to the phone while it searches, then it plays from pos (0: from the start) */
 static void on_playbest(const CastPlay *p) {
-  app_activity();
+  app_activity(); app_overlay_close(); /* (the first start's guide open: it stayed over the film, which played unseen behind it) */
   snprintf(castTitle, sizeof castTitle, "%s", p->title);
-  const char *type = *p->type ? p->type : "movie", *id = p->id; char vid[96];
+  const char *type = *p->type ? p->type : "movie", *id = p->id; char vid[SB_VID];
   if (*p->vid) snprintf(vid, sizeof vid, "%s", p->vid); else if (!strcmp(type, "series") && p->season > 0) snprintf(vid, sizeof vid, "%s:%d:%d", id, p->season, p->episode); else snprintf(vid, sizeof vid, "%s", id);
   player_next_subs(NULL, NULL, 0); player_next_art(p->title, p->poster, p->background, p->logo);
   player_cast_best(type, id, vid, p->pos);
@@ -64,13 +64,14 @@ static void on_account(const char *ak, const char *userJson) {
   if (!ak || !*ak) return; cJSON *u = cJSON_Parse(userJson ? userJson : ""); const cJSON *id = cJSON_GetObjectItemCaseSensitive(u, "_id");
   int same = sb_signed_in() && cJSON_IsString(id) && sb_user_id() && !strcmp(sb_user_id(), id->valuestring); cJSON_Delete(u);
   if (same || (sb_signed_in() && !strcmp(sb_auth_key(), ak))) return;
+  app_overlay_close(); /* (the sign-in opens: nothing left over it) */
   fprintf(stderr, "[cast] account from the phone: %s\n", sb_signed_in() ? "another user" : "signing in");
   if (player_open()) player_cast(4, 0);
   if (sb_signed_in()) { sb_forget_local(); board_invalidate(); }
   toast(T("Signing in with your phone\xe2\x80\x99s account"), 2500, NULL);
   extern void login_finish(const char *); if (SCR != SCR_LOGIN) app_go(SCR_LOGIN, NULL, 1); login_finish(ak); /* the sign-in's own loading, then Home */
 }
-static void on_pref(const char *k, const char *v) { if (settings_apply_pref(k, v) && !player_open()) toast(T("Settings updated from your phone"), 2000, NULL); } /* (one short notice, no key cap before it; none while a title plays: the change shows itself, the subtitles moving or changing) */
+static void on_pref(const char *k, const char *v) { static double saidAt = -10; if (settings_apply_pref(k, v) && !player_open() && app_now() - saidAt > 3) { saidAt = app_now(); toast(T("Settings updated from your phone"), 2000, NULL); } } /* (once for a phone's settings sent together: each one changed had its own toast, nine at a connect) */ /* (one short notice, no key cap before it; none while a title plays: the change shows itself, the subtitles moving or changing) */
 static void on_pairing(const char *code) { snprintf(codeNow, sizeof codeNow, "%s", code); }
 static void on_connected(int n) { static int was; if (n > was && !player_open()) btr_cast_hold(20); /* a phone just connected: its play comes next, no trailer flashes before it */ if (n > was) toast(T("Phone connected"), 2500, NULL); else if (n < was && !n) toast(T("Phone disconnected"), 2500, NULL); was = n; }
 

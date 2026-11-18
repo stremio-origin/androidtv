@@ -8,7 +8,9 @@
 typedef struct { int page; unsigned gen; int x, y, w, h; } AtlasSlot;   /* page -1 = no slot */
 #define ATLAS_W 1024
 #define ATLAS_H 1024
-void   atlas_frame(void);                                        /* once per frame */
+void   atlas_frame(void);
+void   atlas_low_memory(void);                                /* a box with little memory: fewer pages */
+int    atlas_trim(unsigned idleFrames);                         /* pages not drawn for idleFrames let go (not the first); how many */                                        /* once per frame */
 int    atlas_put(const unsigned char *alpha, int w, int h, int preferPage, int keep, AtlasSlot *out); /* 1 = placed; keep = counted as live until released */
 int    atlas_valid(const AtlasSlot *s);                          /* still there (its page was not wiped) */
 void   atlas_touch(const AtlasSlot *s);                          /* drawn this frame */

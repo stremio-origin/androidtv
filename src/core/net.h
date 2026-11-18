@@ -47,6 +47,7 @@ int      net_stream_sync(const char *url, int timeoutMs, NetSink sink, void *ud)
    stallSec seconds without a byte. Worker threads only. The HTTP status, 0 when it failed, -1 when the sink stopped it */
 typedef void (*NetHdrSink)(const char *line, void *ud);
 int      net_pipe_sync(const char *url, const char *headers, int head, NetHdrSink hs, NetSink sink, void *ud, int stallSec);
+int      net_pipe_sync_ct(const char *url, const char *headers, int head, NetHdrSink hs, NetSink sink, void *ud, int stallSec, long connectMs); /* connectMs: its own connect time */
 
 /* Ranged reads on one kept-alive connection (worker threads only: it blocks). net_range_get reads
    [start, start+len) into *out (malloc'd, *got bytes; a short read returns what came) and the file's

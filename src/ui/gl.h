@@ -6,8 +6,10 @@
 #  define GL_SILENCE_DEPRECATION 1
 #  include <OpenGL/gl.h>
 #  define SB_GLSL_PRECISION ""
+#  define SB_GLSL_PRECISION_VS ""
 #else
 #  include <GLES2/gl2.h>
 #  define SB_GLSL_PRECISION "precision mediump float;\n"
+#  define SB_GLSL_PRECISION_VS "precision highp float;\n" /* (positions: mediump steps a whole unit above 1024 on Mali; every GLES2 vertex stage has highp) */
 #endif
 #endif

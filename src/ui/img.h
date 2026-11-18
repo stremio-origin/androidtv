@@ -37,3 +37,4 @@ void   img_cover_uv(float ta, float ba, int anchorTop, float *u0, float *v0, flo
 #endif
 void   img_queue_stats(int *queued, int *waiting); /* development: decodes queued, decoded pictures waiting for upload */
 void img_set_upload_budget(long bytes); /* pictures sent to the GPU per frame (bytes): the box's measured rate (Android TV) */
+void img_release_all(void); /* every texture but the pinned ones let go (the background, a small box) */

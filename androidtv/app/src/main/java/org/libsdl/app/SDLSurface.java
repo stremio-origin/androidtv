@@ -59,6 +59,8 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         // Some arbitrary defaults to avoid a potential division by zero
         mWidth = 1.0f;
         mHeight = 1.0f;
+        /* the pointer's scale also when only the view changes size (a fixed buffer keeps its size: surfaceChanged is not called) */
+        addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (mWidth > 1 && v.getWidth() > 0) { SDLActivity.mPtrSX = mWidth / v.getWidth(); SDLActivity.mPtrSY = mHeight / v.getHeight(); } });
 
         mIsSurfaceReady = false;
     }
@@ -112,6 +114,9 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
 
         mWidth = width;
         mHeight = height;
+        /* a fixed drawing size (720p) smaller than the view: the pointer's view position is scaled to the drawing (SDL clamps it to the window) */
+        SDLActivity.mPtrSX = getWidth() > 0 ? width / (float) getWidth() : 1f;
+        SDLActivity.mPtrSY = getHeight() > 0 ? height / (float) getHeight() : 1f;
         int nDeviceWidth = width;
         int nDeviceHeight = height;
         try
@@ -232,6 +237,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
             SDLGenericMotionListener_API12 motionListener = SDLActivity.getMotionListener();
             x = motionListener.getEventX(event);
             y = motionListener.getEventY(event);
+            if (!motionListener.inRelativeMode()) { x *= SDLActivity.mPtrSX; y *= SDLActivity.mPtrSY; }
 
             SDLActivity.onNativeMouse(mouseButton, action, x, y, motionListener.inRelativeMode());
         } else {
@@ -239,8 +245,8 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                 case MotionEvent.ACTION_MOVE:
                     for (i = 0; i < pointerCount; i++) {
                         pointerFingerId = event.getPointerId(i);
-                        x = event.getX(i) / mWidth;
-                        y = event.getY(i) / mHeight;
+                        x = event.getX(i) / (getWidth() > 0 ? getWidth() : mWidth);
+                        y = event.getY(i) / (getHeight() > 0 ? getHeight() : mHeight);
                         p = event.getPressure(i);
                         if (p > 1.0f) {
                             // may be larger than 1.0f on some devices
@@ -264,8 +270,8 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                     }
 
                     pointerFingerId = event.getPointerId(i);
-                    x = event.getX(i) / mWidth;
-                    y = event.getY(i) / mHeight;
+                    x = event.getX(i) / (getWidth() > 0 ? getWidth() : mWidth);
+                    y = event.getY(i) / (getHeight() > 0 ? getHeight() : mHeight);
                     p = event.getPressure(i);
                     if (p > 1.0f) {
                         // may be larger than 1.0f on some devices
@@ -278,8 +284,8 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
                 case MotionEvent.ACTION_CANCEL:
                     for (i = 0; i < pointerCount; i++) {
                         pointerFingerId = event.getPointerId(i);
-                        x = event.getX(i) / mWidth;
-                        y = event.getY(i) / mHeight;
+                        x = event.getX(i) / (getWidth() > 0 ? getWidth() : mWidth);
+                        y = event.getY(i) / (getHeight() > 0 ? getHeight() : mHeight);
                         p = event.getPressure(i);
                         if (p > 1.0f) {
                             // may be larger than 1.0f on some devices

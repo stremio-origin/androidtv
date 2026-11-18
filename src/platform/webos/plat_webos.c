@@ -33,7 +33,6 @@ void plat_pre_init(const char *appId) {
   if (!getenv("XDG_RUNTIME_DIR")) setenv("XDG_RUNTIME_DIR", "/tmp/xdg", 1);
   SDL_SetHint(SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_BACK, "true");
   SDL_SetHint(SDL_HINT_WEBOS_ACCESS_POLICY_KEYS_EXIT, "true");
-  SDL_SetHint(SDL_HINT_WEBOS_CURSOR_SLEEP_TIME, "5000"); /* the TV's own pointer sleeps after 5 s still, as the app puts it away (left unset, 5 minutes; a TV whose SDL does not know it ignores it) */
   char *base = SDL_GetBasePath(); /* from /proc/self/exe: inside the jail, the jail's own path to the app */
   snprintf(assetDir, sizeof assetDir, "%sassets", base ? base : "./");
   /* the app's writable folder, kept across updates where the install allows it. The first that takes a file:
@@ -161,9 +160,18 @@ const char *plat_ui_locale(void) {
   fprintf(stderr, "[i18n] TV language: %s\n", loc[0] ? loc : "(no answer)");
   return loc[0] ? loc : NULL;
 }
-void plat_pointer_visible(int on) { /* SDL's own cursor call: in every SDL webOS ships (3 included), the TV's cursor shown or hidden for the app's window */
-  int r = SDL_ShowCursor(on ? SDL_ENABLE : SDL_DISABLE); fprintf(stderr, "[ptr] %s (%d)\n", on ? "shown" : "hidden", r);
-}
+/* the TV's own pointer, shown or hidden with the TV's SDL call for it (SDL_webOSCursorVisibility), looked up as the
+   app runs: a TV without it keeps its pointer to itself (it sleeps on its own, its 485 notice puts the app's away).
+   Never SDL_ShowCursor(SDL_DISABLE): on webOS 4.5 (SDL 2.0.4, 2.0.5) the hidden pointer sent no movement, the only
+   thing that showed it again (#89) */
+static SDL_bool (*cursorVis)(SDL_bool); static int cursorLooked;
+int plat_pointer_can_hide(void) {
+  if (!cursorLooked) { cursorLooked = 1; void *me = dlopen(NULL, RTLD_NOW); if (me) *(void **)(&cursorVis) = dlsym(me, "SDL_webOSCursorVisibility");
+    fprintf(stderr, "[ptr] the TV's pointer call: %s\n", cursorVis ? "there" : "not on this TV (the TV's pointer sleeps on its own)"); }
+  return cursorVis != NULL; }
+void plat_pointer_visible(int on) { static int last = -1;
+  if (!plat_pointer_can_hide()) return; cursorVis(on ? SDL_TRUE : SDL_FALSE);
+  if (on != last) { last = on; fprintf(stderr, "[ptr] %s\n", on ? "shown" : "hidden"); } } /* (logged on a change: a hand moving during a film asks it again every second) */
 /* the TV's SDL knows the panel without a system service (a refused systemproperty call leaves 4K sets at 1080p) */
 int plat_panel_lines(void) {
   SDL_bool (*res)(int *, int *) = NULL; *(void **)(&res) = dlsym(RTLD_DEFAULT, "SDL_webOSGetPanelResolution");

@@ -80,6 +80,12 @@ void gfx_target_free(GfxTarget *t);
 void gfx_upscale(unsigned tex, int screenW, int screenH);
 double gfx_upload_kb_ms(void); /* pictures to the GPU: KB a millisecond on this box (0 unknown) */
 double gfx_layer_ms(int w, int h); /* the GPU's time for one full-screen blended layer at w x h (ms; 0 unknown) */
+void gfx_set_predraw(void (*f)(unsigned tex)); /* called before a batch reading tex is drawn (the text atlas sends its waiting pieces) */
+void gfx_tex_upload_raw(unsigned tex, const unsigned char *px, int x, int y, int w, int h, int ch); /* pixels sent, nothing else touched */
+void gfx_tex_set_opaque(unsigned tex, int on); /* every pixel of tex is fully opaque (pictures): drawn whole and unfaded, it needs no blending */
+void gfx_tex_content_changed(void);
+void gfx_low_memory(void);
+int  gfx_context_ok(void); /* 0: the GPU state the app made is gone (lost while the app was away) */ /* a box with little memory: a smaller pool of textures kept for reuse */ /* pixels the last frame drew changed (the partial redraw draws all next) */
 void gfx_still(int on);          /* Android TV: a frame the same as the last one is not drawn again (see gfx.c) */
 void gfx_still_reset(void);      /* the screen lost its frame: the next is drawn */
 int  gfx_still_skipped(void);    /* after gfx_end: 1 when this frame was the last one again (nothing to swap) */

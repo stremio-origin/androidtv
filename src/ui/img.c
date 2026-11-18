@@ -64,7 +64,7 @@ typedef struct Img {
   char *url; unsigned hash; int w, h;           /* the cache key (a shaped variant carries its shape in it) and the requested size */
   char *src; int fit; float radius;             /* the picture's own address; fit -1 = as it is, else the shape (img_get_shaped) */
   int state;                                    /* 0 queued, 1 loading, 2 ready, 3 failed */
-  unsigned char *px; int pw, ph, pch;           /* decoded pixels waiting for upload */
+  unsigned char *px; int pw, ph, pch, opaque;   /* decoded pixels waiting for upload (opaque: no pixel shows through: drawn without blending) */
   GLuint tex; float aspect; int bytes;
   GLuint upTex; int upRow;                      /* a large picture uploading in bands over several frames */
   int urgent;                                   /* the picture the screen waits on (a backdrop): it goes up first, in bigger bands */
@@ -271,6 +271,7 @@ static void *worker(void *a) { plat_thread_background(10); int wid = (int)(intpt
     im->state = 1; if (wid < WORKERS_MAX) busy[wid] = im;
     pthread_mutex_unlock(&mu);
     load(im);
+    if (im->px && im->pch == 4) { int op = 1; for (long i = 3, n = (long)im->pw * im->ph * 4; i < n; i += 4) if (im->px[i] != 255) { op = 0; break; } im->opaque = op; } else im->opaque = 0; /* (a JPEG poster or backdrop: every pixel opaque) */
     pthread_mutex_lock(&mu); if (wid < WORKERS_MAX) busy[wid] = NULL;
     if (im->state != 3) im->state = 2;
     done_push(im);
@@ -392,11 +393,11 @@ static long upUrgent(void) { return upBudget * 2 > UP_URGENT ? upBudget * 2 : UP
 static int upLog = -1; /* SB_UPLOG: each upload's size and time (development) */
 static void up_log(const char *what, long bytes, Uint64 t0) { if (upLog < 0) upLog = getenv("SB_UPLOG") != NULL; if (!upLog) return; double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency(); fprintf(stderr, "[up] %s %ld KB %.1f ms\n", what, bytes / 1024, ms); }
 static Img *upCur;
-static void up_done(Img *im) { im->tex = im->upTex; im->upTex = 0; gfx_tex_fade_in(im->tex); im->shown = 1; /* every arrival fades in, a reload too: one let go under a fast scroll and loaded again came back over its placeholder at once (a pop); one loaded again out of sight has faded before it is seen */
+static void up_done(Img *im) { im->tex = im->upTex; im->upTex = 0; gfx_tex_set_opaque(im->tex, im->opaque); gfx_tex_fade_in(im->tex); im->shown = 1; /* every arrival fades in, a reload too: one let go under a fast scroll and loaded again came back over its placeholder at once (a pop); one loaded again out of sight has faded before it is seen */
   if (im->askAt > 0 && frameNo - im->lastUse <= 2) { waitMs[waitN++ & 127] = (float)((mono_s() - im->askAt) * 1000); im->askAt = 0; } /* (on screen: how long it took) */ im->bytes = im->pw * im->ph * im->pch; usedBytes += im->bytes; free(im->px); im->px = NULL; im->lastUse = frameNo; }
 static long up_band(Img *im, long budget) { /* rows up to the budget, in whole 16-row blocks; what was sent */
   long row = (long)im->pw * im->pch; int rows = (int)(budget / row); rows = rows < 16 ? 16 : rows & ~15; if (im->upRow + rows > im->ph) rows = im->ph - im->upRow;
-  Uint64 u0 = SDL_GetPerformanceCounter(); gfx_tex_update(im->upTex, im->px + (size_t)im->upRow * row, 0, im->upRow, im->pw, rows, im->pch); up_log("band", (long)rows * row, u0); im->upRow += rows;
+  Uint64 u0 = SDL_GetPerformanceCounter(); gfx_tex_upload_raw(im->upTex, im->px + (size_t)im->upRow * row, 0, im->upRow, im->pw, rows, im->pch); /* (not drawn until whole: nothing on screen changes) */ up_log("band", (long)rows * row, u0); im->upRow += rows;
   if (im->upRow >= im->ph) { up_done(im); upCur = NULL; }
   return rows * row;
 }
@@ -440,6 +441,11 @@ void img_release_unused(int keepMb) {
     o->state = 2; o->wantTex = 0;
   }
 }
+/* every picture's texture let go but the pinned ones (the app in the background on a box with little memory: Android
+   kills the biggest apps first; each comes back from its small copy when next asked for) */
+void img_release_all(void) {
+  for (int b = 0; b < BUCKETS; b++) for (Img *i = table[b]; i; i = i->next) if (i->tex && !i->pin) {
+    gfx_tex_recycle(i->tex, i->pw, i->ph, i->pch, 1); i->tex = 0; usedBytes -= i->bytes; i->bytes = 0; i->evictAt = mono_s(); stEvict++; i->state = 2; i->wantTex = 0; } }
 void img_cover_uv(float ta, float ba, int top, float *u0, float *v0, float *u1, float *v1) {
   *u0 = 0; *v0 = 0; *u1 = 1; *v1 = 1;
   if (ta > ba) { float k = ba / ta; *u0 = (1 - k) / 2; *u1 = *u0 + k; }  /* texture wider than the box: crop the sides */

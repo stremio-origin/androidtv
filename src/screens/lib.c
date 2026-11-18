@@ -59,7 +59,7 @@ static struct {
   Tween gridY, fsc, osc; int fcur, fold; Timer1 ringPop, gridIn; Tween ringA;   /* the focused poster lifts (1.05), the one left settles back */
   /* the head: what is shown, what it replaces (held until the crossfade is over), and what comes next */
   Head cur, prev; Facts fprev; Timer1 headIn, factsIn; char hLogo[512];
-  char wantId[64], shownId[64]; int wantIdx, wantStage; double wantAt, logoDeadline, metaDeadline;
+  char wantId[SB_ID], shownId[SB_ID]; int wantIdx, wantStage; double wantAt, logoDeadline, metaDeadline;
   LibIt remIt; int remIdx; double remAt; /* one just taken out: it fades and shrinks where it was while the ones after move back a place */
 } L;
 
@@ -175,7 +175,7 @@ static void on_head_meta(cJSON *m, void *ud) { (void)ud; if (!m || SCR != SCR_LI
   L.fprev = L.cur.f; L.cur.f = F; timer_start(&L.factsIn, 0.35f); }
 /* a title's details asked once: its answer is on its way (the meta call itself does not merge requests) */
 static void meta_once(const Item *it) {
-  static char asked[16][64]; static double askedAt[16]; static int an; double now = app_now();
+  static char asked[16][SB_ID]; static double askedAt[16]; static int an; double now = app_now();
   if (!strcmp(it->type, "collection") || sb_meta_cached(it->type, it->id)) return; /* (a collection: its words are its own) */
   for (int i = 0; i < 16; i++) if (!strcmp(asked[i], it->id) && now - askedAt[i] < 15) return;
   snprintf(asked[an], sizeof asked[an], "%s", it->id); askedAt[an] = now; an = (an + 1) % 16;
@@ -233,6 +233,7 @@ static void enter(const void *p) {
   if (!keep) { L.ver = lib_version(); load(); coll_cards(); L.collVer = coll_version(); render(); }
   L.pc.dur = L.ps.dur = L.pf.dur = GLIDE_DUR; L.cur.on = L.cur.on && L.shownId[0]; L.prev.on = 0; L.headIn.on = L.factsIn.on = 0; rail_paint(1);
   if (!L.n) { L.zone = 0; L.ri = L.tab; }
+  if (L.cur.on) { char bu[512], pu[512]; bg_set(sb_bg_mid(&L.cur.it, bu, sizeof bu), 0, sb_poster_of(&L.cur.it, pu, sizeof pu)); } /* the head kept from the last visit: its backdrop again (Home had set its own since; the head's picker does not set it for a title already shown) */
   L.fcur = L.fold = -1; paint(); tween_set(&L.gridY, L.gridY.to);
   timer_start(&L.gridIn, 0.3f + 0.12f); if (L.cur.on) timer_start(&L.headIn, 0.35f); /* every visit: the cards rise in and the head fades up again, not only the first */
 }
@@ -278,7 +279,7 @@ static void tick(float dt) {
     if (was && L.n == nw - 1) for (int i = 0; i < nw; i++) { int in = 0; for (int j = 0; j < L.n && !in; j++) in = !strcmp(at(j)->it.id, was[i].it.id); if (!in) { L.remIt = was[i]; L.remIdx = i; L.remAt = app_now(); break; } }
     free(was); if (!L.n) { L.zone = 0; L.ri = L.tab; } paint(); } /* the library changed (the card menu, a sync) */
   if (L.built && L.collVer != coll_version()) { L.collVer = coll_version(); int grew = coll_cards(); /* more known about the collections */
-    if (L.tab == F_COLL && grew) { char fid[64] = ""; const LibIt *f = at(L.idx); if (f) snprintf(fid, sizeof fid, "%s", f->it.id); int had = L.n; render(); if (had) L.gridIn.on = 0; /* (the cards there stay put: only the new one comes) */
+    if (L.tab == F_COLL && grew) { char fid[SB_ID] = ""; const LibIt *f = at(L.idx); if (f) snprintf(fid, sizeof fid, "%s", f->it.id); int had = L.n; render(); if (had) L.gridIn.on = 0; /* (the cards there stay put: only the new one comes) */
       for (int i = 0; fid[0] && i < L.n; i++) if (!strcmp(at(i)->it.id, fid)) { L.idx = i; break; } paint(); }
     else if (grew) { int c = 0; for (int j = 0; j < L.nall; j++) if (pass(&L.all[j], F_COLL)) c++; L.counts[F_COLL] = c; snprintf(L.cnt[F_COLL], sizeof L.cnt[F_COLL], "%d", c); rail_paint(0); } }
   for (int i = 0; i < NB; i++) { tween_tick(&L.bx[i], dt); tween_tick(&L.la[i], dt); tween_tick(&L.bw[i], dt); }

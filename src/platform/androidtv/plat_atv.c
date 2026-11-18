@@ -24,6 +24,8 @@
 #include "platform/androidtv/atv.h"
 #include "core/app.h"
 #include "ui/img.h"
+#include "ui/atlas.h"
+#include "ui/gfx.h"
 #include "cJSON.h"
 
 static char assetDir[1024], dataDir[1024], devName[200], lastExit[160];
@@ -95,6 +97,7 @@ void atv_call_int(const char *name, int v) { JNIEnv *e = atv_env(); jmethodID m 
    pixels (malloc) and their size, or NULL. Called from the picture workers (each attached to Java by SDL); every
    local reference let go at once: a worker lives as long as the app */
 unsigned char *atv_jpeg_decode(const unsigned char *data, size_t len, int bw, int bh, int *w, int *h) {
+  extern int atvSafeStart; if (atvSafeStart) return NULL; /* (a safe start: the app's own decoder only) */
   JNIEnv *e = atv_env(); static jmethodID m; static int none; if (none || !e) return NULL;
   if (!m) { m = atv_method(e, 0, "decodeJpeg", "([BII)[B"); if (!m) { none = 1; return NULL; } }
   jbyteArray in = (*e)->NewByteArray(e, (jsize)len); if (!in) { (*e)->ExceptionClear(e); return NULL; }
@@ -179,14 +182,9 @@ void plat_pre_init(const char *appId) { (void)appId;
 void plat_post_window(SDL_Window *w) { (void)w; }
 const char *plat_asset_dir(void) { return assetDir; }
 const char *plat_data_dir(void) { return dataDir; }
-/* the drawing surface, fixed as on LG: 1920x1080 (a 4K screen scales it up, as LG's own compositor does), or 1280x720
-   when the "720p light" setting is on; the same setting and rule as the TV (main.c) */
-void plat_window_size(int *w, int *h, Uint32 *flags) {
-  const char *res = getenv("SB_RES") ? getenv("SB_RES") : store_get("uiRes", "auto");
-  int light = !strcmp(res, "720");
-  *w = light ? 1280 : 1920; *h = light ? 720 : 1080; *flags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
-  atv_call_int("surfaceSize", light ? 720 : 1080);
-}
+/* the drawing surface's size is fixed by Java before SDL makes the surface (MainActivity.drawLines: 1280x720 on a box
+   found weak, else 1920x1080); the window takes that size (main.c reads it back) */
+void plat_window_size(int *w, int *h, Uint32 *flags) { *w = 1920; *h = 1080; *flags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN; }
 int plat_text_input(void) { return 0; }   /* a remote, no keyboard: the app draws its own */
 const char *plat_device_name(void) { return devName; }
 static int meminfo(const char *key) { FILE *f = fopen("/proc/meminfo", "r"); if (!f) return -1; char l[160]; int v = -1; size_t kl = strlen(key);
@@ -197,7 +195,11 @@ void plat_thread_background(int nice) { setpriority(PRIO_PROCESS, (id_t)syscall(
 /* Home, another app, the screen saver: the activity pauses (SDL stops the loop until it is back) */
 int plat_lifecycle(const SDL_Event *e) {
   static int away;
-  if (e->type == SDL_APP_WILLENTERBACKGROUND || e->type == SDL_APP_DIDENTERBACKGROUND) { if (!away) fprintf(stderr, "[life] to the back\n"); away = 1; return -1; }
+  if (e->type == SDL_APP_WILLENTERBACKGROUND || e->type == SDL_APP_DIDENTERBACKGROUND) { if (!away) { fprintf(stderr, "[life] to the back\n");
+      /* a box with little memory: the pictures and idle text pages go with the app to the back (Android kills the biggest
+         first; they come back from their small copies when it is in front again) */
+      int mb = plat_mem_total_mb(); if (mb > 0 && mb < 1500) { img_release_all(); gfx_pool_clear(); int pg = atlas_trim(1); fprintf(stderr, "[mem] in the back: pictures, kept textures and %d text page(s) let go\n", pg); } }
+    away = 1; return -1; }
   if ((e->type == SDL_APP_DIDENTERFOREGROUND) && away) { away = 0; fprintf(stderr, "[life] back in front\n"); return 1; }
   return 0;
 }
@@ -231,7 +233,8 @@ void plat_luna_pump(void) {
   /* Android's memory warnings (onTrimMemory): pictures not on screen are let go at once, and the budget shrinks while
      the box is short (as the core's own guard does from the free memory it reads) */
   atv_jstr(e, (jstring)(*e)->CallStaticObjectMethod(e, atv_class(e, 0), take, (jint)2), b, sizeof b);
-  if (atv_check(e) && b[0]) { int lvl = atoi(b); fprintf(stderr, "[mem] Android asks for memory back (level %d)\n", lvl); img_release_unused(1); }
+  if (atv_check(e) && b[0]) { int lvl = atoi(b); img_release_unused(1); gfx_pool_clear(); int pages = atlas_trim(600); /* (the textures kept for reuse, and text pages idle 10 s. The background's own trim is plat_lifecycle's: a level read here arrives after the app is back in front) */
+    fprintf(stderr, "[mem] Android asks for memory back (level %d): pictures not on screen, kept textures and %d text page(s) let go\n", lvl, pages); }
   /* the launch's parameters, as LG's launch params reach its core: {"cast":1} when the phone opened the app to play */
   atv_jstr(e, (jstring)(*e)->CallStaticObjectMethod(e, atv_class(e, 0), take, (jint)3), b, sizeof b);
   if (atv_check(e) && b[0]) { fprintf(stderr, "[life] launch params %s\n", b); app_launch_params(b); }

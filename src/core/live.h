@@ -13,7 +13,7 @@
 #define LIVE_TOAST "\002live" /* a toast key: a red LIVE chip before the words */
 
 /* a channel as the catalogs keep it (small: there can be thousands); live_item makes it a card */
-typedef struct { char id[64], type[16], name[96], logo[300], poster[300]; } LiveCh;
+typedef struct { char id[SB_ID], type[16], name[96], logo[300], poster[300]; } LiveCh;
 void live_item(const LiveCh *c, Item *out);
 extern void (*live_fail_hook)(const char *id, const char *code, int back); /* a channel started that will not play (code "offair": known off air, not tried; "nostream": none of its streams sent a picture; back: the channel before plays on), for a phone casting; NULL: no one told */
 extern void (*live_remote_play)(const Item *it); /* a phone casting: a channel started is handed to the TV (it finds its stream there and opens its channel player); NULL on a TV */
@@ -32,7 +32,8 @@ void live_zap(int dir);                      /* the next / previous channel of t
 int  live_back(void);                        /* the channel played before this one, started; 0 when none */
 void live_tick(void);                        /* every frame (the main thread) */
 void live_cancel(void);
-int  live_failover(const char *id);           /* the channel's stream failed in the player: its next working one plays (0: none left) */
+int  live_failover(const char *id, const char *url); /* the channel's stream (url) failed in the player: its next working one plays (0: none left) */
+void live_found_keep(const char *id, const Stream *st); /* the channel's stream shows a picture in the player */
 /* Home's preview of a focused channel: its stream looked for quietly (OK then opens it at once) */
 void live_peek(const Item *it);
 int  live_peek_stream(const char *id, Stream *out);

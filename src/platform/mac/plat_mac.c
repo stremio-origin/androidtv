@@ -59,3 +59,4 @@ void plat_luna_pump(void) {}
 int plat_luna_send(const char *uri, const char *payload) { (void)uri; (void)payload; return 0; }
 int plat_panel_lines(void) { return 0; }
 void plat_pointer_visible(int on) { (void)on; }
+int plat_pointer_can_hide(void) { return 1; } /* (the window's own pointer: the app's goes away by itself) */

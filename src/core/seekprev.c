@@ -245,7 +245,7 @@ static void *fetch_run(void *arg) { Ctx *c = arg; nice_to(10);
       } /* (a keyframe with no place in its Cluster: 1 MB of it, most such keyframes lie within) */
       if (nb < 2) { if (nb) { k = ks[0]; c->e[k].st = 0; } goto single; } /* (one alone, aimed or not: mkv_key_read does the same on its own) */ /* (only one to ask: the plain way) */
       pthread_mutex_unlock(&c->mu); ensure_net(); unsigned char *parts[BATCH]; long plen[BATCH]; int hs = 0; double r0 = mono();
-      int e = mkv_dead(c->m) ? NR_NET : net_range_multi(fnet, mkv_url(c->m), sts, lns, nb, parts, plen, &hs, 15000);
+      int e = mkv_dead(c->m) ? NR_NET : net_range_multi(fnet, mkv_url(c->m), sts, lns, nb, parts, plen, &hs, 15000), eM = e; /* (eM: the batch's own answer, before the aimed rounds below) */
       int got = 0; long by = 0; for (int i = 0; i < nb; i++) if (parts[i]) by += plen[i];
       unsigned char *fr[BATCH]; long fl[BATCH]; int fr_r[BATCH];
       for (int i = 0; i < nb; i++) { fr[i] = NULL; fl[i] = 0; fr_r[i] = -1; if (!parts[i] || aim[i]) continue; long b2 = 0; int rq = 0; fr_r[i] = mkv_key_from_part(c->m, fnet, ks[i], parts[i], plen[i], cap, &fr[i], &fl[i], &b2, &rq); by += b2; free(parts[i]); if (!fr_r[i]) got++; if (npf[i] && !fr_r[i]) { pthread_mutex_lock(&c->mu); c->npl++; if (b2 > 0) c->npl2++; pthread_mutex_unlock(&c->mu); } }
@@ -262,10 +262,11 @@ static void *fetch_run(void *arg) { Ctx *c = arg; nice_to(10);
           if (!fr_r[i]) got++; } }
       pthread_mutex_lock(&c->mu); c->bytes += by;
       if (c->multi < 0 && nb >= 2 && (e == NR_OK || e == NR_NORANGE)) { /* (one range alone tells nothing: a server answers it plainly either way) */ c->multi = e == NR_OK && (got > 0 || aimParts > 0); fprintf(stderr, "[seekprev] this server %s many keyframes in one request\n", c->multi ? "answers" : "doesn't answer"); }
+      int toSingle = 0; if (c->multi < 0 && nb >= 2 && eM != NR_OK && eM != NR_NORANGE && eM != NR_BUSY && !mkv_dead(c->m)) { c->multi = 0; toSingle = 1; fprintf(stderr, "[seekprev] many keyframes in one request: no answer (%d, HTTP %d), one at a time from now\n", eM, hs); } /* (never answered that way yet: a server that lets such a request hang (a debrid's) is asked one range at a time, as the finger's reads that work there; not a refusal) */
       if (getenv("SB_SPDBG")) { long fs = 0, ws = 0; int np = 0; for (int i = 0; i < nb; i++) { fs += fl[i]; ws += lns[i]; np += npf[i]; } fprintf(stderr, "[seekprev] batch of %d: %d pictures, %ld KB in %.0f ms (%d, HTTP %d); asked %ld KB, frames %ld KB, %d with no place, window %ld KB, misses %d/%d\n", nb, got, by / 1024, (mono() - r0) * 1000, e, hs, ws / 1024, fs / 1024, np, win / 1024, c->npl2, c->npl); }
       if (nAim && getenv("SB_SPDBG")) fprintf(stderr, "[seekprev] of them %d read where they should lie: %ld KB in %d more requests, %d walked the old way\n", nAim, aimBy / 1024, aimRounds, aimOld);
       for (int i = 0; i < nb; i++) { if (!fr_r[i]) { size_seen(c, fl[i]); enqueue(c, ks[i], fr[i], fl[i], fb); } else c->e[ks[i]].st = fr_r[i] == -3 || fr_r[i] == -4 ? 3 : 0; }
-      if (e == NR_BUSY) went_busy(c, "the server asks to slow down"); else if (e == NR_OK && got) went_ok(c); else if (e != NR_NORANGE) went_busy(c, "a read failed");
+      if (e == NR_BUSY) went_busy(c, "the server asks to slow down"); else if (e == NR_OK && got) went_ok(c); else if (e != NR_NORANGE && !toSingle) went_busy(c, "a read failed");
       if (e == NR_NORANGE && c->multi == 1) { if (++c->plain >= 2) { c->multi = 0; fprintf(stderr, "[seekprev] this server stopped answering many keyframes in one request: one at a time\n"); } } else if (e == NR_OK) c->plain = 0; /* (never the same batch asked again and again) */
       continue; }
     /* one keyframe: the finger's, a server that takes one range at a time, or one whose place in its Cluster is still to find */

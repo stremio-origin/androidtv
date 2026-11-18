@@ -47,6 +47,9 @@ int plat_luna_send(const char *uri, const char *payload);
 /* shows or hides the TV's own pointer (the Magic Remote's): the app puts it away as the TV's own apps do (an arrow
    key, the controls fading over a film); it comes back by itself when the remote moves. Nothing off webOS */
 void plat_pointer_visible(int on);
+/* the TV's pointer can be hidden by the app (its SDL has the call): else the app's own pointer does not go away
+   after a while by itself, only with the TV's (its 485 notice), so a still pointer never stays on screen pointing at nothing */
+int plat_pointer_can_hide(void);
 /* the panel's lines (2160 on a 4K TV) from the platform itself, without a system service; 0 when unknown */
 int plat_panel_lines(void);
 #endif

@@ -30,6 +30,7 @@ static Prog progs[P_N];
 static int curProg = -1;
 static GLuint curTex;
 static int batchOpaque = 1, blendOn = 1;
+static unsigned spillBy[5]; /* (what made frames whole: a texture freed, one let go outside the pool, the atlas, a texture changed, an offscreen picture) */
 static int recOn, curHole, glHole, recWant, recSpilled, recSame, lastOk, recNB, recNV; static unsigned texGen, lastGen; static uint32_t recClear; /* (Android TV: the frame kept, see gfx_still) */
 static GLuint vbos[3]; static int vboCur; static GLsizeiptr vboOff, vboCap; static double flushMs; static int flushN; /* three streaming buffers in turn: the GPU may still read the last frame's */
 static int surfW, surfH;
@@ -45,15 +46,15 @@ static float scx[16], scy[16], sox[16], soy[16], scOx[16], scOy[16]; static int 
 
 static const char *VS =
   "attribute vec2 aPos; attribute vec2 aUv; attribute vec4 aCol; attribute vec4 aRect; attribute vec4 aPar;\n"
-  "uniform float uScale; uniform vec2 uView;\n"
-  "varying vec2 vUv; varying vec4 vCol; varying vec4 vRect; varying vec4 vPar; varying vec2 vPos;\n"
-  "void main(){ vUv=aUv; vCol=aCol; vRect=aRect; vPar=aPar; vPos=aPos;\n"
+  "uniform mediump float uScale; uniform vec2 uView;\n" /* (uScale is shared with the fragment programs: the same precision on both sides, or the link fails) */
+  "varying vec2 vUv; varying vec4 vCol; varying vec4 vRect; varying vec4 vPar; varying vec2 vLoc;\n"
+  "void main(){ vUv=aUv; vCol=aCol; vRect=aRect; vPar=aPar; vLoc=aPos - aRect.xy;\n" /* (the pixel's place from its box's centre, worked out here at full precision: the fragment programs' mediump keeps small numbers exact, not a whole unit's steps at x > 1024) */
   "  vec2 p = aPos * uScale; gl_Position = vec4(p.x / uView.x * 2.0 - 1.0, 1.0 - p.y / uView.y * 2.0, 0.0, 1.0); }\n";
 /* signed distance to the rounded rectangle, in layout units; soft = edge width (1 px of AA, or a blur) */
 static const char *FS_COMMON =
-  "varying vec2 vUv; varying vec4 vCol; varying vec4 vRect; varying vec4 vPar; varying vec2 vPos;\n"
+  "varying vec2 vUv; varying vec4 vCol; varying vec4 vRect; varying vec4 vPar; varying vec2 vLoc;\n"
   "uniform float uScale;\n"
-  "float sdf(){ vec2 q = abs(vPos - vRect.xy) - (vRect.zw - vec2(vPar.x)); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - vPar.x; }\n"
+  "float sdf(){ vec2 q = abs(vLoc) - (vRect.zw - vec2(vPar.x)); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - vPar.x; }\n"
   "float cover(float d, float soft){ return 1.0 - smoothstep(-soft, soft, d); }\n";
 static const char *FS_SHAPE =
   "void main(){ float d = sdf(); float s = max(vPar.y, 0.5 / uScale); float a;\n"
@@ -80,7 +81,7 @@ static const char *FS_BLUR =
    resting faint, drifting a little with it), and a faint rim along the edge (the glass's thickness); pos 0..1 across */
 static const char *FS_GLARE =
   "void main(){ float d = sdf(); float a = cover(d, max(vPar.y, 0.5 / uScale));\n"
-  "  vec2 rel = (vPos - (vRect.xy - vRect.zw)) / (2.0 * vRect.zw); float t = (rel.x + 0.45 * (1.0 - rel.y)) / 1.45, p = vPar.z;\n"
+  "  vec2 rel = (vLoc + vRect.zw) / (2.0 * vRect.zw); float t = (rel.x + 0.45 * (1.0 - rel.y)) / 1.45, p = vPar.z;\n"
   "  float wide = 1.0 - smoothstep(0.0, 0.26, abs(t - p)); wide *= wide;\n"
   "  float thin = 1.0 - smoothstep(0.0, 0.035, abs(t - (p - 0.17)));\n"
   "  float top = mix(1.0, 0.35, rel.y), rim = (1.0 - smoothstep(0.0, 3.0 * uScale, -d)) * mix(1.0, 0.35, rel.y);\n"
@@ -94,11 +95,11 @@ static const char *FS_GLARE =
 static const char *FS_LIQUID =
   "uniform sampler2D uTex;\n"
   "void main(){ float d = sdf(); float a = cover(d, 0.6 / uScale);\n"
-  "  vec2 rel = vPos - vRect.xy; float band = min(vRect.z, vRect.w);\n"
+  "  vec2 rel = vLoc; float band = min(vRect.z, vRect.w);\n"
   "  float e = clamp(1.0 + d / (band * 0.95), 0.0, 1.0); e = e * e * (3.0 - 2.0 * e); e *= e;\n" /* (the edge ramp: one clamp, no smoothstep call) */
   "  vec2 n = rel / max(vRect.zw, vec2(1.0)); n *= inversesqrt(dot(n, n) + 0.0001);\n"
   "  vec2 off = n * (vPar.z * e) * vec2(vPar.w, vPar.y);\n"
-  "  vec2 sp = (vRect.xy - vRect.zw) + vCol.rg * 2.0 * vRect.zw; vec2 ds = vPos - sp; float sr = max(vRect.w, 1.0) * 1.5;\n"
+  "  vec2 ds = vLoc + vRect.zw - vCol.rg * 2.0 * vRect.zw; float sr = max(vRect.w, 1.0) * 1.5;\n"
   "  float q = clamp(1.0 - dot(ds, ds) / (sr * sr) * 0.25, 0.0, 1.0); q *= q; float lens = vCol.b * q * q; off += ds * lens * 0.75 * vec2(vPar.w, vPar.y);\n" /* (the spot: (1 - t/4)^4 for exp(-t), no exp on this GPU) */
   "  vec3 c = vec3(texture2D(uTex, vUv - off * 1.4).r, texture2D(uTex, vUv - off).g, texture2D(uTex, vUv - off * 0.6).b);\n"
   "  float l = dot(c, vec3(0.299, 0.587, 0.114)); c = clamp(mix(vec3(l), c, 1.6 + 0.5 * lens) * (1.08 + 0.15 * lens) + 0.025 + 0.02 * lens, 0.0, 1.0);\n"
@@ -116,7 +117,7 @@ static GLuint shader(GLenum type, const char *a, const char *b, const char *c) {
   return s;
 }
 static int program(Prog *p, const char *fs) {
-  GLuint v = shader(GL_VERTEX_SHADER, SB_GLSL_PRECISION, VS, NULL), f = shader(GL_FRAGMENT_SHADER, SB_GLSL_PRECISION, FS_COMMON, fs);
+  GLuint v = shader(GL_VERTEX_SHADER, SB_GLSL_PRECISION_VS, VS, NULL), f = shader(GL_FRAGMENT_SHADER, SB_GLSL_PRECISION, FS_COMMON, fs);
   p->prog = glCreateProgram(); glAttachShader(p->prog, v); glAttachShader(p->prog, f); glLinkProgram(p->prog);
   GLint ok = 0; glGetProgramiv(p->prog, GL_LINK_STATUS, &ok);
   if (!ok) { char log[1024]; glGetProgramInfoLog(p->prog, sizeof log, NULL, log); fprintf(stderr, "[gfx] link: %s\n", log); return 0; }
@@ -127,7 +128,10 @@ static int program(Prog *p, const char *fs) {
 }
 
 int gfx_init(int w, int h) {
-  if (!program(&progs[P_SHAPE], FS_SHAPE) || !program(&progs[P_IMAGE], FS_IMAGE) || !program(&progs[P_ALPHA], FS_ALPHA) || !program(&progs[P_PLAIN], FS_PLAIN) || !program(&progs[P_PLAINIMG], FS_PLAINIMG) || !program(&progs[P_BLUR], FS_BLUR) || !program(&progs[P_GLARE], FS_GLARE) || !program(&progs[P_LIQUID], FS_LIQUID)) return 0;
+  if (!program(&progs[P_SHAPE], FS_SHAPE) || !program(&progs[P_IMAGE], FS_IMAGE) || !program(&progs[P_ALPHA], FS_ALPHA) || !program(&progs[P_PLAIN], FS_PLAIN) || !program(&progs[P_PLAINIMG], FS_PLAINIMG)) return 0;
+  /* the effects' programs (blur, glare, liquid glass) are made after the first frames, one a frame, or when first used:
+     linking them all at the start held a Mali-G52 on a black screen for seconds (seen in another app of this kind), and
+     one a driver refuses no longer stops the app: what it draws falls back to a plain picture, or is left out */
   glGenBuffers(3, vbos); vboCap = (GLsizeiptr)sizeof(Vtx) * MAX_VTX; for (int i = 0; i < 3; i++) { glBindBuffer(GL_ARRAY_BUFFER, vbos[i]); glBufferData(GL_ARRAY_BUFFER, vboCap, NULL, GL_STREAM_DRAW); }
   glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glEnable(GL_BLEND);
   glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -135,6 +139,7 @@ int gfx_init(int w, int h) {
   fprintf(stderr, "[gfx] %s | %s | %s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION));
   return 1;
 }
+int gfx_context_ok(void) { return progs[P_PLAIN].prog && glIsProgram(progs[P_PLAIN].prog); } /* (still the GPU state the app made: some boxes drop it while the app is away) */
 void gfx_resize(int w, int h) { lastOk = 0; surfW = w; surfH = h; scl = (float)w / SB_W; glViewport(0, 0, w, h); }
 float gfx_scale(void) { return scl; }
 int gfx_draw_calls(void) { return drawCalls; }
@@ -155,6 +160,13 @@ void gfx_fill_report(char *out, int cap) { /* screens' worth per frame: shape, i
   memset(fillA, 0, sizeof fillA); fillFrames = 0; }
 int gfx_quads(void) { return quadsDrawn; }
 
+static signed char optState[P_N]; /* 0 not made yet, 1 made, -1 refused */
+static int opt_ready(int p) {
+  if (p != P_BLUR && p != P_GLARE && p != P_LIQUID) return 1;
+  if (optState[p] == 0) { const char *fs = p == P_BLUR ? FS_BLUR : p == P_GLARE ? FS_GLARE : FS_LIQUID; Uint32 t0 = SDL_GetTicks();
+    optState[p] = program(&progs[p], fs) ? 1 : -1;
+    fprintf(stderr, "[gfx] %s program %s in %u ms\n", p == P_BLUR ? "blur" : p == P_GLARE ? "glare" : "liquid", optState[p] > 0 ? "made" : "refused by the driver: drawn plain", SDL_GetTicks() - t0); }
+  return optState[p] > 0; }
 static void use(int p) {
   Prog *P = &progs[p]; glUseProgram(P->prog);
   glUniform1f(P->uScale, scl); glUniform2f(P->uView, (float)surfW, (float)surfH);
@@ -173,16 +185,25 @@ void gfx_flush(void) {
   if (recOn && !tgtOn) { rec_add(); return; } /* (Android TV: kept, drawn at the frame's end if it is not the last one again) */
   submit();
 }
+static int tex_opaque(GLuint t);
+static void (*predrawHook)(GLuint);
+void gfx_set_predraw(void (*f)(GLuint tex)) { predrawHook = f; }
 static void submit(void) {
+  if (!opt_ready(curProg)) { if (curProg == P_GLARE) { nvtx = 0; return; } if (curProg == P_LIQUID) for (int i = 0; i < nvtx; i++) vtx[i].color |= 0x00FFFFFFu; /* (liquid's colour carries its light spot, not a tint: the plain picture untinted) */ curProg = curProg == P_LIQUID ? P_IMAGE : P_PLAINIMG; } /* (an effect the driver refused: the picture plain, a glare left out) */
+  if (predrawHook && curTex && curProg != P_SHAPE && curProg != P_PLAIN) predrawHook(curTex); /* (the text atlas: its waiting pieces sent before the draw that reads them) */
   use(curProg);
   if (curHole != glHole) { glHole = curHole; if (glHole) glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA); else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); } /* (the video's hole erases what is under it) */
   if (curProg != P_SHAPE && curProg != P_PLAIN) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, curTex); }
-  int wantBlend = !(curProg == P_PLAIN && batchOpaque); if (wantBlend != blendOn) { blendOn = wantBlend; if (blendOn) glEnable(GL_BLEND); else glDisable(GL_BLEND); } /* opaque fills skip the read-modify-write */
+  int wantBlend = !((curProg == P_PLAIN || (curProg == P_PLAINIMG && tex_opaque(curTex))) && batchOpaque); /* (an opaque picture drawn whole and unfaded is plain too: the same pixels, no read of what is under it) */ if (wantBlend != blendOn) { blendOn = wantBlend; if (blendOn) glEnable(GL_BLEND); else glDisable(GL_BLEND); } /* opaque fills skip the read-modify-write */
   static int logFrame0 = -1; if (logFrame0 < 0) logFrame0 = getenv("SB_FLUSHLOG") ? atoi(getenv("SB_FLUSHLOG")) : 0; if (logFrame0 && (int)frameCounter == logFrame0) glFinish();
   Uint32 t0 = SDL_GetTicks(); GLsizeiptr bytes = nvtx * (GLsizeiptr)sizeof(Vtx);
   static int clientVtx = -1; if (clientVtx < 0) {
-#ifdef SB_WEBOS
-    clientVtx = getenv("SB_VBO") == NULL; /* the driver maps new memory for every buffer update: client arrays are three times cheaper per draw */
+#if defined(SB_WEBOS) || defined(SB_ANDROIDTV)
+    clientVtx = getenv("SB_VBO") == NULL; /* the driver maps new memory for every buffer update: client arrays are three times cheaper per draw.
+       Android TV: most boxes and TV sets are Mali (Amlogic, MediaTek, Rockchip) or PowerVR, which draw a frame later than
+       it is asked for: a buffer rewritten while earlier draws still read it is copied whole by the driver, each time
+       (measured on a Mali-G52 box: ~150 updates of a 1.28 MB buffer a frame, 344-663 ms of each frame, 2 fps) */
+    fprintf(stderr, "[gfx] vertices %s\n", clientVtx ? "from the app's memory (client arrays)" : "through a streamed buffer (SB_VBO)");
 #else
     clientVtx = getenv("SB_CLIENTVTX") != NULL;
 #endif
@@ -213,6 +234,7 @@ void gfx_invalidate_state(void) { curProg = -1; curTex = 0; lastOk = 0; } /* som
 double gfx_flush_ms(int reset) { double v = flushN ? flushMs : 0; if (reset) { flushMs = 0; flushN = 0; } return v; }
 void gfx_set_screen_fbo(GLuint fbo) { screenFbo = fbo; }
 void gfx_begin(uint32_t c) {
+  if (frameCounter > 30) { static const int OPT[3] = { P_BLUR, P_GLARE, P_LIQUID }; for (int i = 0; i < 3; i++) if (!optState[OPT[i]]) { opt_ready(OPT[i]); break; } } /* (the effects' programs: one a frame, once the start is drawn) */
   recOn = recWant && !getenv("SB_NOCLEAR"); recSpilled = 0; recSame = 0; recClear = c; recSc[0] = 0; recNB = 0; recNV = 0; /* (the frame's batches, kept: see gfx_still) */
   if (!recOn) glBindFramebuffer(GL_FRAMEBUFFER, screenFbo);
   scrDirty = 0; frameCounter++; pool_age(); vboCur = (vboCur + 1) % 3; glBindBuffer(GL_ARRAY_BUFFER, vbos[vboCur]); vboOff = 0; /* this frame's buffer: the GPU finished with it two frames ago */
@@ -313,7 +335,11 @@ static int rec_diff(float (*bx)[4], int *nb) {
     if (a->prog != b->prog || a->tex != b->tex || a->opaque != b->opaque || a->hole != b->hole || memcmp(a->sc, b->sc, sizeof a->sc) || a->n != b->n) {
       float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(va, a->n, r); box_add(bx, nb, r); float q[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(vb, b->n, q); box_add(bx, nb, q); any = 1; continue; }
     if (!memcmp(va, vb, sizeof(Vtx) * a->n)) continue;
-    for (int k = 0; k + 6 <= a->n; k += 6) if (memcmp(va + k, vb + k, sizeof(Vtx) * 6)) { float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(va + k, 6, r); vbox(vb + k, 6, r); box_add(bx, nb, r); any = 1; } }
+    for (int k = 0; k + 6 <= a->n; k += 6) if (memcmp(va + k, vb + k, sizeof(Vtx) * 6)) { float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(va + k, 6, r); vbox(vb + k, 6, r); box_add(bx, nb, r); any = 1;
+        { static int dbg = -1; static unsigned n; if (dbg < 0) dbg = getenv("SB_STILLWHY") != NULL; /* development: a big change, named */
+          if (dbg && (r[2] - r[0]) * (r[3] - r[1]) > 0.3f * SB_W * SB_H && (n++ % 120) == 0) { const Vtx *x = va + k, *y = vb + k;
+            fprintf(stderr, "[stillwhy] batch %d prog %d tex %u: %.0fx%.0f at %.0f,%.0f; now colour %08x uv %.4f,%.4f pos %.2f,%.2f / was %08x uv %.4f,%.4f pos %.2f,%.2f\n", i, a->prog, (unsigned)a->tex,
+              r[2] - r[0], r[3] - r[1], r[0], r[1], x->color, x->u, x->v, x->x, x->y, y->color, y->u, y->v, y->x, y->y); } } } }
   box_merge(bx, nb);
   { static int one = -1; if (one < 0) one = getenv("SB_ONEBOX") != NULL; /* (development: one box around all the changes, as before) */
     if (one && *nb > 1) { for (int i = 1; i < *nb; i++) { bx[0][0] = fminf(bx[0][0], bx[i][0]); bx[0][1] = fminf(bx[0][1], bx[i][1]); bx[0][2] = fmaxf(bx[0][2], bx[i][2]); bx[0][3] = fmaxf(bx[0][3], bx[i][3]); } *nb = 1; } }
@@ -334,14 +360,16 @@ double gfx_upload_kb_ms(void) {
 }
 double gfx_layer_ms(int w, int h) {
   GfxTarget t; if (!gfx_target_create(&t, w, h)) return 0;
-  double best = 1e9; const int layers = 4;
-  for (int run = 0; run < 3; run++) { /* (the first warms the driver up: its shaders, the target's memory) */
+  double best = 1e9; const int layers = 4; Uint64 start = SDL_GetPerformanceCounter(), hz = SDL_GetPerformanceFrequency();
+  /* the first runs wake the GPU up: an idle one starts at its lowest clock (a Mali-G52 box read 14 ms here, ~1 ms awake),
+     and they load the shaders and the target's memory; the best of the later runs counts, within about 0.4 s */
+  for (int run = 0; run < 9 && (run < 4 || (SDL_GetPerformanceCounter() - start) * 1000.0 / hz < 400); run++) {
     glFinish(); Uint64 t0 = SDL_GetPerformanceCounter();
     gfx_target_begin(&t, RGBA(20, 18, 28, 255));
     for (int i = 0; i < layers; i++) { gfx_rect(0, 0, SB_W, SB_H * 2, RGBA(40 + i * 20, 30, 60, 120)); gfx_flush(); }
     gfx_target_end(); glFinish();
     double ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency() / layers;
-    if (run > 0 && ms < best) best = ms; }
+    if (run >= 3 && ms < best) best = ms; }
   gfx_target_free(&t); return best < 1e9 ? best : 0;
 }
 void gfx_still(int on) { recWant = on; lastOk = 0; }
@@ -370,7 +398,7 @@ void gfx_end(void) {
     rec_keep(); lastGen = texGen; lastOk = 1; still.frames++; }
   else { frameFull = 1; if (recSpilled) { lastOk = 0; recNB = 0; recNV = 0; } if (recWant) { still.whole++; still.frames++; } } /* (drawn as it came: nothing to compare the next one with) */
   glDisable(GL_SCISSOR_TEST);
-  if (recWant && still.frames >= 3600) { fprintf(stderr, "[still] of %u frames: %u not drawn, %u in part (%.0f%% of the screen on average), %u whole (new %u, pictures %u, clear %u, batches %u, big %u; resets %u, spills %u)\n", still.frames, still.kept, still.part, still.part ? 100 * still.partArea / still.part : 0.0, still.whole, still.why[0], still.why[1], still.why[2], still.why[3], still.why[4], still.resets, still.spills); still.resets = still.spills = 0;
+  if (recWant && still.frames >= 3600) { fprintf(stderr, "[still] of %u frames: %u not drawn, %u in part (%.0f%% of the screen on average), %u whole (new %u, pictures %u, clear %u, batches %u, big %u; resets %u, spills %u)\n", still.frames, still.kept, still.part, still.part ? 100 * still.partArea / still.part : 0.0, still.whole, still.why[0], still.why[1], still.why[2], still.why[3], still.why[4], still.resets, still.spills); fprintf(stderr, "[still] spills by: freed %u, freed outside the pool %u, text page %u, texture changed %u, offscreen %u\n", spillBy[0], spillBy[1], spillBy[2], spillBy[3], spillBy[4]); memset(spillBy, 0, sizeof spillBy); still.resets = still.spills = 0;
     still.frames = still.kept = still.part = still.whole = 0; still.partArea = 0; memset(still.why, 0, sizeof still.why); }
 }
 #ifdef SB_ANDROIDTV
@@ -379,7 +407,8 @@ void gfx_end(void) {
 static int still_buffer_age(void) {
   static int has = -1; EGLDisplay d = eglGetCurrentDisplay(); EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
   if (d == EGL_NO_DISPLAY || s == EGL_NO_SURFACE) return 0;
-  if (has < 0) { const char *e = eglQueryString(d, EGL_EXTENSIONS); has = e && strstr(e, "EGL_EXT_buffer_age") != NULL; fprintf(stderr, "[gfx] buffer age %s\n", has ? "known: parts copied" : "not told: copied whole"); }
+  if (has < 0) { const char *e = eglQueryString(d, EGL_EXTENSIONS); has = e && strstr(e, "EGL_EXT_buffer_age") != NULL; /* (EXT only: under KHR_partial_update alone, what is outside a damage region the app has not set is undefined after a swap) */
+    fprintf(stderr, "[gfx] EGL: %s\n", e ? e : "?"); { const char *g = (const char *)glGetString(GL_EXTENSIONS); GLint mt = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mt); fprintf(stderr, "[gfx] GL (max texture %d): %.1500s\n", (int)mt, g ? g : "?"); } fprintf(stderr, "[gfx] buffer age %s\n", has ? "known: parts copied" : "not told: copied whole"); }
   EGLint age = 0; if (!has || !eglQuerySurface(d, s, 0x313D /* EGL_BUFFER_AGE_EXT */, &age)) return 0; return age; }
 #else
 static int still_buffer_age(void) { return 0; }
@@ -414,16 +443,11 @@ void gfx_upscale(GLuint tex, int W, int H) {
     float kx = (float)W / surfW, ky = (float)H / surfH; int x0 = (int)floorf(P[0] * kx) - 2, x1 = (int)ceilf((P[0] + P[2]) * kx) + 2, y0 = (int)floorf(P[1] * ky) - 2, y1 = (int)ceilf((P[1] + P[3]) * ky) + 2;
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > W) x1 = W; if (y1 > H) y1 = H;
     glEnable(GL_SCISSOR_TEST); glScissor(x0, H - y1, x1 - x0, y1 - y0); }
-  else { /* the copy covers the whole screen: its last picture is not needed. Said to the driver, a tiled GPU (every box's) skips
-       reading the old frame back from memory into each tile before drawing; a driver with neither call gets a clear,
-       which tiled GPUs take the same way */
-    typedef void (*Discard)(GLenum, GLsizei, const GLenum *); static Discard discard; static int how = -1;
-    if (how < 0) { const char *v = (const char *)glGetString(GL_VERSION); how = 0;
-      if (SDL_GL_ExtensionSupported("GL_EXT_discard_framebuffer") && (discard = (Discard)SDL_GL_GetProcAddress("glDiscardFramebufferEXT"))) how = 1;
-      else if (v && strstr(v, "OpenGL ES 3") && (discard = (Discard)SDL_GL_GetProcAddress("glInvalidateFramebuffer"))) how = 2;
-      fprintf(stderr, "[gfx] screen copy: %s\n", how == 1 ? "discard (EXT)" : how == 2 ? "invalidate (ES 3)" : "clear"); }
-    static const GLenum color = 0x1800; /* GL_COLOR_EXT / GL_COLOR: the default framebuffer's colour */
-    if (how) discard(GL_FRAMEBUFFER, 1, &color); else glClear(GL_COLOR_BUFFER_BIT); } /* (copied whole only: a part keeps the rest) */
+  else { /* the copy covers the whole screen: a clear first tells a tiled GPU (every box's) not to read the old frame back into
+       each tile. (A discard / invalidate says the same, but on Android it made a Xiaomi box with a Mali-G31 flicker and
+       freeze in another app of this kind; Arm's own advice is a clear at the start of each target) */
+    static int said; if (!said) { said = 1; fprintf(stderr, "[gfx] screen copy: clear first\n"); }
+    glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT); } /* (copied whole only: a part keeps the rest) */
   glUseProgram(prog); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glEnableVertexAttribArray(aP); glVertexAttribPointer(aP, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), q);
@@ -502,7 +526,7 @@ static Corner corners[NCORNERS]; static int ncorners, stickyPage; static unsigne
 static float smooth01(float e0, float e1, float x) { float t = (x - e0) / (e1 - e0); if (t < 0) t = 0; if (t > 1) t = 1; return t * t * (3 - 2 * t); }
 static const Corner *corner_get(int kind, float rL, float tL, float bL) {
   int R = (int)(rL * scl + 0.5f), T4 = (int)(tL * scl * 4 + 0.5f), B4 = (int)(bL * scl * 4 + 0.5f);
-  int page = (curProg == P_ALPHA && nvtx) ? atlas_page_of(curTex) : -1; if (page < 0) page = stickyPage;
+  int page = (curProg == P_ALPHA && nvtx) ? atlas_page_of(curTex) : -1; if (page < 0) page = stickyPage; if (!atlas_tex(page)) page = 0; /* (a page let go by atlas_trim: the first, never let go) */
   cornerTick++;
   Corner *c = NULL;
   for (int i = 0; i < ncorners; i++) { Corner *k = &corners[i];
@@ -566,7 +590,7 @@ static int nine(int kind, float x, float y, float w, float h, float r, float t, 
 }
 /* square fills: small ones join the alpha batch (one texel that is fully on), big ones keep the cheapest program */
 static void plain(float x, float y, float w, float h, uint32_t c00, uint32_t c10, uint32_t c01, uint32_t c11) {
-  if (w * h < 250000.0f && atlas_pages()) { int page = (curProg == P_ALPHA && nvtx) ? atlas_page_of(curTex) : -1; if (page < 0) page = stickyPage;
+  if (w * h < 250000.0f && atlas_pages()) { int page = (curProg == P_ALPHA && nvtx) ? atlas_page_of(curTex) : -1; if (page < 0) page = stickyPage; if (!atlas_tex(page)) page = 0; /* (a page let go: the first) */
     float u, v; atlas_solid_uv(page, &u, &v); quad(P_ALPHA, atlas_tex(page), x, y, w, h, 0, 0, 0, 0, c00, c10, c01, c11, u, v, u, v); return; }
   quad(P_PLAIN, 0, x, y, w, h, 0, 0, 0, 0, c00, c10, c01, c11, 0, 0, 1, 1);
 }
@@ -613,17 +637,23 @@ void gfx_circle(float cx, float cy, float r, uint32_t c) { gfx_rrect(cx - r, cy 
 /* every texture made here, with its size: the memory line in the log sums them, and a texture let go is pooled by
    its real size, never by what a caller believes it is */
 #define TREG 8192
-static struct { GLuint t; int w, h, ch; } treg[TREG];
+static struct { GLuint t; int w, h, ch, opaque; } treg[TREG]; /* (opaque: every pixel fully opaque, said by whoever filled it: drawn plain, without blending) */
 static void treg_add(GLuint t, int w, int h, int ch) { if (!t) return; unsigned i = t % TREG; for (int k = 0; k < TREG; k++, i = (i + 1) % TREG) if (!treg[i].t || treg[i].t == t) {
     if (treg[i].t == t) { texBytes -= (long)treg[i].w * treg[i].h * treg[i].ch; texCount--; }
-    treg[i].t = t; treg[i].w = w; treg[i].h = h; treg[i].ch = ch; texBytes += (long)w * h * ch; texCount++; return; } }
+    treg[i].t = t; treg[i].w = w; treg[i].h = h; treg[i].ch = ch; treg[i].opaque = 0; texBytes += (long)w * h * ch; texCount++; return; } }
+static int treg_find(GLuint t);
+void gfx_tex_set_opaque(GLuint t, int on) { int i = treg_find(t); if (i >= 0) treg[i].opaque = on; }
+static int tex_opaque(GLuint t) { int i = treg_find(t); return i >= 0 && treg[i].opaque; }
 static int treg_find(GLuint t) { unsigned i = t % TREG; for (int k = 0; k < TREG; k++, i = (i + 1) % TREG) { if (treg[i].t == t) return (int)i; if (!treg[i].t) return -1; } return -1; }
 static void treg_del(GLuint t) { int i = treg_find(t); if (i < 0) return; texBytes -= (long)treg[i].w * treg[i].h * treg[i].ch; texCount--; treg[i].t = 0;
   /* (open addressing: the run after it is put back so later lookups still find their entries) */
-  for (unsigned j = ((unsigned)i + 1) % TREG; treg[j].t; j = (j + 1) % TREG) { GLuint u = treg[j].t; int w = treg[j].w, h = treg[j].h, ch = treg[j].ch; treg[j].t = 0; texBytes -= (long)w * h * ch; texCount--; treg_add(u, w, h, ch); } }
-static void gl_del(GLuint t) { gfx_still_spill(); texGen++; treg_del(t); glDeleteTextures(1, &t); }
+  for (unsigned j = ((unsigned)i + 1) % TREG; treg[j].t; j = (j + 1) % TREG) { GLuint u = treg[j].t; int w = treg[j].w, h = treg[j].h, ch = treg[j].ch, op = treg[j].opaque; treg[j].t = 0; texBytes -= (long)w * h * ch; texCount--; treg_add(u, w, h, ch); { int k = treg_find(u); if (k >= 0) treg[k].opaque = op; }; } }
+static void spill_by(int k) { if (recOn) spillBy[k]++; gfx_still_spill(); }
+static void gl_del(GLuint t) { spill_by(0); texGen++; treg_del(t); glDeleteTextures(1, &t); }
 #define POOL_N 8
-#define POOL_BYTES (12L * 1024 * 1024)
+static long poolCap = 12L * 1024 * 1024; /* (4 MB on a box with little memory: gfx_low_memory) */
+#define POOL_BYTES poolCap
+void gfx_low_memory(void) { poolCap = 4L * 1024 * 1024; }
 static struct { GLuint t; int w, h, ch, lin; unsigned at; } pool[POOL_N];
 static void pool_drop(int i) { gl_del(pool[i].t); poolBytes -= (long)pool[i].w * pool[i].h * pool[i].ch; pool[i] = pool[--npool]; }
 static GLuint pool_take(int w, int h, int ch, int lin) {
@@ -633,7 +663,7 @@ static GLuint pool_take(int w, int h, int ch, int lin) {
 }
 void gfx_tex_recycle(GLuint t, int w, int h, int ch, int linear) {
   if (!t) return; if (curTex == t) gfx_flush(); extern void gfx_tex_fade_forget(GLuint); gfx_tex_fade_forget(t);
-  { int r = treg_find(t); if (r < 0) { gfx_still_spill(); texGen++; glDeleteTextures(1, &t); return; } w = treg[r].w; h = treg[r].h; ch = treg[r].ch; } /* (its real size) */
+  { int r = treg_find(t); if (r < 0) { spill_by(1); texGen++; glDeleteTextures(1, &t); return; } w = treg[r].w; h = treg[r].h; ch = treg[r].ch; } /* (its real size) */
   for (int i = 0; i < npool; i++) if (pool[i].t == t) return; /* (already kept) */
   long b = (long)w * h * ch; if (b < 64 * 1024 || b > POOL_BYTES / 2) { gl_del(t); return; } /* (small ones are cheap to make) */
   while (npool && (npool == POOL_N || poolBytes + b > POOL_BYTES)) { int o = 0; for (int i = 1; i < npool; i++) if (pool[i].at < pool[o].at) o = i; pool_drop(o); }
@@ -642,9 +672,10 @@ void gfx_tex_recycle(GLuint t, int w, int h, int ch, int linear) {
 void gfx_pool_clear(void) { while (npool) pool_drop(npool - 1); } /* (the memory guard) */
 static void pool_age(void) { for (int i = 0; i < npool; i++) if (frameCounter - pool[i].at > 600) { pool_drop(i); i--; } } /* none kept past 10 s */
 GLuint gfx_tex_create(const unsigned char *px, int w, int h, int ch, int linear) {
-  gfx_still_spill(); texGen++;
+  /* (a new texture changes nothing already drawn: no batch of the last frame or this one reads it yet. An id freed and
+     given out again was counted when it was freed (gl_del); one kept for reuse was unused for 3 frames) */
   GLenum f = ch == 1 ? GL_ALPHA : ch == 3 ? GL_RGB : GL_RGBA;
-  { GLuint t = pool_take(w, h, ch, linear); if (t) { glBindTexture(GL_TEXTURE_2D, t); if (curTex == t) curTex = 0;
+  { GLuint t = pool_take(w, h, ch, linear); if (t) { glBindTexture(GL_TEXTURE_2D, t); if (curTex == t) curTex = 0; gfx_tex_set_opaque(t, 0); /* (new pixels: opaque only once its filler says so) */
       if (px) { glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, f, GL_UNSIGNED_BYTE, px); } return t; } }
   GLuint t; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -696,8 +727,20 @@ void gfx_alpha_tex_uv(GLuint tex, float x, float y, float w, float h, uint32_t c
   if (!tex || invisible(c) || clipped_out(x, y, w, h)) return;
   quad(P_ALPHA, tex, x, y, w, h, 0, 0, 0, 0, c, c, c, c, u0, v0, u1, v1);
 }
+/* a texture's pixels sent with nothing else touched: no batch drawn first, the frame's kept batches left alone. For a
+   texture no batch has drawn yet, or a part of one no batch reads (the text atlas's new pieces) */
+void gfx_tex_upload_raw(GLuint t, const unsigned char *px, int x, int y, int w, int h, int ch) {
+  gfx_tex_set_opaque(t, 0);
+  GLenum f = ch == 1 ? GL_ALPHA : ch == 3 ? GL_RGB : GL_RGBA;
+  glBindTexture(GL_TEXTURE_2D, t); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, f, GL_UNSIGNED_BYTE, px);
+  /* (curTex left as it is: every draw binds its own texture right after the pre-draw hook. Clearing it here, inside that
+     hook, drew the batch being sent with no texture: new text missing, and kept on screen by the partial redraw) */
+}
+void gfx_tex_content_changed(void) { spill_by(2); texGen++; } /* pixels the last frame drew are different now */
 void gfx_tex_update(GLuint t, const unsigned char *px, int x, int y, int w, int h, int ch) {
-  gfx_still_spill(); texGen++;
+  gfx_tex_set_opaque(t, 0);
+  spill_by(3); texGen++;
   gfx_flush(); /* what is queued draws first (each flush binds its own texture again) */
   GLenum f = ch == 1 ? GL_ALPHA : ch == 3 ? GL_RGB : GL_RGBA;
   glBindTexture(GL_TEXTURE_2D, t); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -738,7 +781,7 @@ void gfx_blur_pass(GfxTarget *dst, GLuint src, int w, int h, int vertical, float
 }
 int gfx_mid_switches(void) { int n = midSwitch; midSwitch = 0; return n; }
 void gfx_target_begin(GfxTarget *t, uint32_t c) {
-  gfx_still_spill(); texGen++;
+  spill_by(4); texGen++;
   gfx_flush();
   if (scrDirty) { midSwitch++; if (getenv("SB_MIDLOG")) fprintf(stderr, "[mid] %ux%u at frame %u\n", t->w, t->h, frameCounter); }
   tgtOn = 1; saved.on = 1; saved.surfW = surfW; saved.surfH = surfH; saved.scl = scl; saved.nclip = nclip; saved.nopac = nopac; saved.noff = noff; saved.nsc = nsc;

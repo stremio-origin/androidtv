@@ -139,13 +139,13 @@ static struct { int on; Stream s; Item it; double at; } SW;
 static void switch_to(const Stream *s, const Item *it) { SW.on = 1; SW.s = *s; SW.it = *it; SW.at = SDL_GetTicks() / 1000.0 + 0.16; player_zap_begin(); }
 static int waitPic; static double waitAt; /* waitPic: handed to the player; the card tunes on until the picture runs */
 static void switch_tick(void) { if (!SW.on || SDL_GetTicks() / 1000.0 < SW.at) return; SW.on = 0; player_quiet_next(); app_play(&SW.s, SW.it.type, SW.it.id, SW.it.id, 0); player_title_hint(&SW.it); hub_playing(SW.it.id); card.tuning = 1; waitPic = 1; waitAt = SDL_GetTicks() / 1000.0; } /* (the pill tunes on until the new picture runs) */
-static struct { char id[64]; int st; Stream s; } PK;
+static struct { char id[SB_ID]; int st; Stream s; } PK;
 /* what was last found of a channel's streams (1 one sends a picture, -1 none does), kept ten minutes */
-static struct { char id[64]; int st; double at; } RC[128]; static int rcNext;
+static struct { char id[SB_ID]; int st; double at; } RC[128]; static int rcNext;
 /* the stream that sent a picture, per channel (the background check's, the preview's, the player's): a preview asked
    for a channel found live opens that one at once instead of trying its streams again from the first (dead ones ahead of
    it ran the search out of time: "off air" on a channel that plays). Kept 3 minutes, as the live mark */
-static struct { char id[64]; Stream s; double at; } FS[24]; static int fsNext;
+static struct { char id[SB_ID]; Stream s; double at; } FS[24]; static int fsNext;
 static void found_set(const char *id, const Stream *st) { int k = -1; for (int i = 0; i < 24; i++) if (!strcmp(FS[i].id, id)) { k = i; break; } if (k < 0) { k = fsNext; fsNext = (fsNext + 1) % 24; }
   snprintf(FS[k].id, sizeof FS[k].id, "%s", id); FS[k].s = *st; FS[k].at = now_s(); }
 static int found_get(const char *id, Stream *out) { for (int i = 0; i < 24; i++) if (FS[i].id[0] && !strcmp(FS[i].id, id)) { if (now_s() - FS[i].at > 180) return 0; *out = FS[i].s; return 1; } return 0; }
@@ -153,54 +153,82 @@ void live_found_drop(const char *id) { if (id) for (int i = 0; i < 24; i++) if (
 static void reach_set(const char *id, int st) { int k = -1; for (int i = 0; i < 128; i++) if (!strcmp(RC[i].id, id)) { k = i; break; } if (k < 0) { k = rcNext; rcNext = (rcNext + 1) % 128; }
   snprintf(RC[k].id, sizeof RC[k].id, "%s", id); RC[k].st = st; RC[k].at = now_s(); } /* the preview's channel: 0 looking, 1 found (s), -1 none sends a picture */
 const LiveCard *live_card(void) { return &card; }
-typedef struct { unsigned char b[2048]; size_t n; int status; } Probe;
-static int probe_sink(const unsigned char *p, size_t n, void *ud) { Probe *r = ud; if (!p) return 1; size_t k = n < sizeof r->b - 1 - r->n ? n : sizeof r->b - 1 - r->n; memcpy(r->b + r->n, p, k); r->n += k; r->b[r->n] = 0; return r->n < 1500; }
-static void probe_hdr(const char *line, void *ud) { Probe *r = ud; int s; if (!strncmp(line, "HTTP/", 5) && sscanf(line, "HTTP/%*s %d", &s) == 1) r->status = s; }
-static int fetch(const char *url, const char *hdrs, Probe *r) { memset(r, 0, sizeof *r); double ft0 = now_s(); int st = net_pipe_sync(url, hdrs, 0, probe_hdr, probe_sink, r, 4);
-  { static int lg = -1; if (lg < 0) lg = getenv("SB_LIVELOG") != NULL; if (lg) { char h[80] = ""; const char *p = strstr(url, "://"); if (p) { p += 3; size_t k = strcspn(p, "/:?"); if (k > 70) k = 70; memcpy(h, p, k); h[k] = 0; } fprintf(stderr, "[livelog] %s: st %d http %d, %d bytes, %.1f s\n", h, st, r->status, (int)r->n, now_s() - ft0); } } /* (development) */ if (st > 0) r->status = st; return r->n > 0 && (r->status == 200 || r->status == 206 || (st < 0 && (r->status == 0 || r->status == 200 || r->status == 206))); }
+/* a check's read: up to lim bytes (a playlist whole, 32 KB; a segment's first bytes); eff: the address it came from
+   after its redirects, what a playlist's relative names are joined to (joined to the first address, a short link's
+   CDN streams were sent to the wrong host and refused) */
+typedef struct { unsigned char b[32768 + 1]; size_t n, lim; int status; char eff[SB_URL_MAX]; } Probe;
+static void resolve(const char *base, const char *ref, char *out, size_t cap);
+static int probe_sink(const unsigned char *p, size_t n, void *ud) { Probe *r = ud; if (!p) return 1; size_t room = r->lim - r->n, k = n < room ? n : room; memcpy(r->b + r->n, p, k); r->n += k; r->b[r->n] = 0; return r->n < r->lim; }
+static void probe_hdr(const char *line, void *ud) { Probe *r = ud; int s; if (!strncmp(line, "HTTP/", 5) && sscanf(line, "HTTP/%*s %d", &s) == 1) r->status = s;
+  else if (!strncasecmp(line, "location:", 9)) { const char *v = line + 9; while (*v == ' ') v++; char loc[SB_URL_MAX], abs[SB_URL_MAX]; size_t k = strcspn(v, "\r\n"); if (!k || k >= sizeof loc) return; memcpy(loc, v, k); loc[k] = 0;
+    resolve(r->eff, loc, abs, sizeof abs); snprintf(r->eff, sizeof r->eff, "%s", abs); } } /* (each redirect: where the next answer comes from) */
+static int fetch(const char *url, const char *hdrs, Probe *r, size_t lim) { r->n = 0; r->b[0] = 0; r->status = 0; r->lim = lim < sizeof r->b - 1 ? lim : sizeof r->b - 1; snprintf(r->eff, sizeof r->eff, "%s", url); double ft0 = now_s();
+  int st = net_pipe_sync_ct(url, hdrs, 0, probe_hdr, probe_sink, r, 4, 3000); /* (3 s to connect: a server that hangs no longer uses the whole search before the next stream is tried) */
+  { static int lg = -1; if (lg < 0) lg = getenv("SB_LIVELOG") != NULL; if (lg) { char h[80] = ""; const char *p = strstr(url, "://"); if (p) { p += 3; size_t k = strcspn(p, "/:?"); if (k > 70) k = 70; memcpy(h, p, k); h[k] = 0; } fprintf(stderr, "[livelog] %s: st %d http %d, %d bytes, %.1f s\n", h, st, r->status, (int)r->n, now_s() - ft0); } } /* (development) */ if (st > 0) r->status = st; return r->n > 0 && (r->status == 200 || r->status == 206); }
 static void resolve(const char *base, const char *ref, char *out, size_t cap) {
   if (strstr(ref, "://")) { snprintf(out, cap, "%s", ref); return; } const char *q = strpbrk(base, "?#"), *e = q ? q : base + strlen(base), *sl = e;
+  if (ref[0] == '/' && ref[1] == '/') { const char *h = strstr(base, "://"); snprintf(out, cap, "%.*s%s", h ? (int)(h - base + 1) : 0, base, ref); return; } /* (//host/path: the same scheme) */
   if (ref[0] == '/') { const char *h = strstr(base, "://"); const char *p = h ? strchr(h + 3, '/') : NULL; snprintf(out, cap, "%.*s%s", p ? (int)(p - base) : (int)strlen(base), base, ref); return; }
   while (sl > base && sl[-1] != '/') sl--; snprintf(out, cap, "%.*s%s", (int)(sl - base), base, ref); }
-/* a media playlist plays here: no DRM the TV cannot open, not a stand-in loop, and its first segment answers with
-   media (a transport stream, fragmented MP4, AAC); a playlist that loads while its segments are refused (a region,
-   an expired token) is caught here, not in the player */
+/* what the first bytes are: 2 media this TV's player reads (a transport stream, fragmented MP4, AAC, FLV, Matroska), 0
+   text (a page, an error, "Access denied", a token message), 1 something else binary (let through, as before) */
+static int media_kind(const unsigned char *d, size_t n) {
+  if (!n) return 0;
+  if (d[0] == 0x47 || (n > 188 && d[188] == 0x47)) return 2;                                   /* MPEG-TS */
+  if (n >= 3 && !memcmp(d, "ID3", 3)) return 2;                                                 /* AAC behind an ID3 tag */
+  if (n >= 2 && d[0] == 0xff && (d[1] & 0xf0) == 0xf0) return 2;                                /* ADTS */
+  if (n >= 3 && !memcmp(d, "FLV", 3)) return 2;
+  if (n >= 4 && d[0] == 0x1a && d[1] == 0x45 && d[2] == 0xdf && d[3] == 0xa3) return 2;           /* EBML (Matroska / WebM) */
+  if (memmem(d, n, "ftyp", 4) || memmem(d, n, "styp", 4) || memmem(d, n, "moof", 4) || memmem(d, n, "sidx", 4)) return 2; /* fragmented MP4 */
+  size_t k = n < 96 ? n : 96, txt = 0; for (size_t i = 0; i < k; i++) { unsigned char c = d[i]; if ((c >= 0x20 && c < 0x7f) || c == '\r' || c == '\n' || c == '\t') txt++; }
+  return txt == k ? 0 : 1; }
+/* a media playlist plays here: no DRM the TV cannot open, not a stand-in loop, at least one segment, and its newest
+   segment (the oldest is about to leave a live window) answers with media; a playlist that loads while its segments
+   are refused (a region, an expired token) is caught here, not in the player */
 static int seg_ok(const char *pl, const char *plUrl, const char *hdrs) {
   if (strstr(pl, "METHOD=SAMPLE-AES") || strstr(pl, "com.widevine") || strstr(pl, "com.microsoft.playready") || strstr(pl, "com.apple.streamingkeydelivery")) return 0;
-  const char *l = strstr(pl, "#EXTINF"); if (!l) return strstr(pl, "#EXT-X-TARGETDURATION") != NULL;
+  const char *l = NULL; for (const char *x = pl; (x = strstr(x, "#EXTINF")); x += 7) l = x; if (!l) return 0; /* (a live playlist with no segment in it: nothing plays) */
   const char *p = strchr(l, '\n'); while (p && (p[1] == '#' || p[1] == '\r' || p[1] == '\n')) p = strchr(p + 1, '\n'); if (!p) return 1; /* (past what was read: the playlist alone) */
   char v[1024], abs[SB_URL_MAX]; size_t k = strcspn(p + 1, "\r\n"); if (!k || k >= sizeof v) return 1; memcpy(v, p + 1, k); v[k] = 0;
   if (strcasestr(v, "offline") || strcasestr(v, "not_available") || strcasestr(v, "notavailable") || strcasestr(v, "geoblock") || strcasestr(v, "unavailable")) return 0; /* a "not on now" loop */
   resolve(plUrl, v, abs, sizeof abs);
-  Probe r; if (!fetch(abs, hdrs, &r)) return 0;
-  const unsigned char *d = r.b; size_t n = r.n;
-  if (d[0] == 0x47 || (n > 188 && d[188] == 0x47)) return 1;                                  /* MPEG-TS */
-  if (n >= 3 && !memcmp(d, "ID3", 3)) return 1;                                                 /* AAC behind an ID3 tag */
-  if (n >= 2 && d[0] == 0xff && (d[1] & 0xf0) == 0xf0) return 1;                                 /* ADTS */
-  if (memmem(d, n, "ftyp", 4) || memmem(d, n, "styp", 4) || memmem(d, n, "moof", 4) || memmem(d, n, "sidx", 4)) return 1; /* fragmented MP4 */
-  return !(d[0] == '<' || d[0] == '{' || d[0] == '['); /* (a page or an error in its place: no) */
+  Probe *r = malloc(sizeof *r); if (!r) return 1; int ok = fetch(abs, hdrs, r, 2048) && media_kind(r->b, r->n) > 0; free(r); return ok; /* (a page or an error text in its place: no) */
 }
-/* a stream sends a picture: a playlist (a master one: its first variant) whose first segment is media, or a body that
-   is no web page or error text */
+/* a stream sends a picture: a media playlist whose newest segment is media; a master one: one of its first three
+   variants that is (one dead rendition no longer condemns the others); any other body that is not text */
 static int works(const Stream *s) {
   if (!strncmp(s->url, "ytid:", 5)) return 1; /* (YouTube: played by the TV's own way) */
   if (strncmp(s->url, "http", 4)) return 0;
   const char *hd = s->hdrs[0] ? s->hdrs : NULL;
-  Probe r; if (!fetch(s->url, hd, &r)) return 0;
-  const char *b = (const char *)r.b; while (*b == ' ' || *b == '\r' || *b == '\n' || (unsigned char)*b == 0xef || (unsigned char)*b == 0xbb || (unsigned char)*b == 0xbf) b++;
+  Probe *r = malloc(sizeof *r); if (!r) return 0; int ok = 0;
+  if (!fetch(s->url, hd, r, 32768)) { free(r); return 0; }
+  const char *b = (const char *)r->b; while (*b == ' ' || *b == '\r' || *b == '\n' || (unsigned char)*b == 0xef || (unsigned char)*b == 0xbb || (unsigned char)*b == 0xbf) b++;
   if (!strncmp(b, "#EXTM3U", 7)) {
-    if (strstr(b, "#EXTINF") || strstr(b, "#EXT-X-TARGETDURATION")) return seg_ok(b, s->url, hd);
-    if (strstr(b, "SAMPLE-AES") || strstr(b, "com.widevine")) return 0;
-    const char *inf = strstr(b, "#EXT-X-STREAM-INF"); if (!inf) return 0; const char *l = strchr(inf, '\n'); while (l && (l[1] == '#' || l[1] == '\r' || l[1] == '\n')) l = strchr(l + 1, '\n'); if (!l) return 0;
-    char v[1024], abs[SB_URL_MAX]; size_t k = strcspn(l + 1, "\r\n"); if (k >= sizeof v) return 0; memcpy(v, l + 1, k); v[k] = 0; resolve(s->url, v, abs, sizeof abs);
-    Probe r2; if (!fetch(abs, hd, &r2)) return 0; const char *b2 = (const char *)r2.b;
-    return (strstr(b2, "#EXTINF") || strstr(b2, "#EXT-X-TARGETDURATION")) && seg_ok(b2, abs, hd); }
-  if (*b == '<' || *b == '{' || *b == '[') return 0; /* a page, an error in JSON */
-  return 1;
+    if (strstr(b, "#EXTINF") || strstr(b, "#EXT-X-TARGETDURATION")) ok = seg_ok(b, r->eff, hd);
+    else if (!strstr(b, "SAMPLE-AES") && !strstr(b, "com.widevine")) {
+      Probe *r2 = malloc(sizeof *r2); const char *inf = b;
+      for (int tries = 0; r2 && !ok && tries < 3 && (inf = strstr(inf, "#EXT-X-STREAM-INF")); tries++, inf += 17) {
+        const char *l = strchr(inf, '\n'); while (l && (l[1] == '#' || l[1] == '\r' || l[1] == '\n')) l = strchr(l + 1, '\n'); if (!l) break;
+        char v[1024], abs[SB_URL_MAX]; size_t k = strcspn(l + 1, "\r\n"); if (!k || k >= sizeof v) continue; memcpy(v, l + 1, k); v[k] = 0; resolve(r->eff, v, abs, sizeof abs);
+        if (!fetch(abs, hd, r2, 32768)) continue; const char *b2 = (const char *)r2->b;
+        ok = (strstr(b2, "#EXTINF") || strstr(b2, "#EXT-X-TARGETDURATION")) && seg_ok(b2, r2->eff, hd); }
+      free(r2); } }
+  else ok = media_kind(r->b, r->n) > 0; /* (a page, an error in JSON or plain words: no) */
+  free(r); return ok;
 }
+/* streams of a channel that failed in the player (no picture, an error): every search for that channel (the player's,
+   the preview's, the background check's) passes over them for 10 minutes; one that later shows a picture is taken off */
+static struct { char id[SB_ID]; unsigned h[8]; int n; double at; } CSK[16]; static int cskNext;
+static unsigned url_h(const char *u);
+static void ch_skip_add(const char *id, const char *url) { int k = -1; for (int i = 0; i < 16; i++) if (!strcmp(CSK[i].id, id)) { k = i; break; }
+  if (k < 0 || now_s() - CSK[k].at > 600) { if (k < 0) { k = cskNext; cskNext = (cskNext + 1) % 16; } snprintf(CSK[k].id, sizeof CSK[k].id, "%s", id); CSK[k].n = 0; }
+  unsigned h = url_h(url); for (int i = 0; i < CSK[k].n; i++) if (CSK[k].h[i] == h) { CSK[k].at = now_s(); return; }
+  if (CSK[k].n < 8) CSK[k].h[CSK[k].n++] = h; CSK[k].at = now_s(); }
+static int ch_skipped(const char *id, const char *url) { unsigned h = 0; for (int i = 0; i < 16; i++) if (CSK[i].id[0] && !strcmp(CSK[i].id, id) && now_s() - CSK[i].at < 600) { if (!h) h = url_h(url); for (int j = 0; j < CSK[i].n; j++) if (CSK[i].h[j] == h) return 1; } return 0; }
+static void ch_skip_clear(const char *id, const char *url) { unsigned h = url_h(url); for (int i = 0; i < 16; i++) if (!strcmp(CSK[i].id, id)) for (int j = 0; j < CSK[i].n; j++) if (CSK[i].h[j] == h) { CSK[i].h[j] = CSK[i].h[--CSK[i].n]; j--; } }
 /* a preview's streams that loaded and never showed a picture (this TV's player does not start some): the next try
    for the preview passes over them, as the player's failover does (a channel the preview called off air played on OK) */
-static unsigned pkSkip[4]; static int npkSkip, pkKeep; static char pkSkipId[64];
+static unsigned pkSkip[4]; static int npkSkip, pkKeep; static char pkSkipId[SB_ID];
 static unsigned url_h(const char *u) { unsigned h = 2166136261u; for (; *u; u++) h = (h ^ (unsigned char)*u) * 16777619u; return h ? h : 1; }
 static int pk_skipped(const char *u) { unsigned h = url_h(u); for (int i = 0; i < npkSkip; i++) if (pkSkip[i] == h) return 1; return 0; }
 /* streams with the ads put in by the server (Google DAI, Pluto's stitcher, Uplynk): webOS 3/4's player loads them and
@@ -226,8 +254,8 @@ static void *probe_run(void *arg) {
   for (;;) {
     pthread_mutex_lock(&L.mu); if (L.tok != tok || L.found) { int stale = L.tok != tok; L.busy = 0; pthread_mutex_unlock(&L.mu); if (stale) kick(); return NULL; } /* (a newer search asked while this one was busy: it starts now, it was never started) */
     if (L.next >= L.ns) { L.busy = 0; pthread_mutex_unlock(&L.mu); return NULL; }
-    int i = L.next++; Stream s = L.s[i]; int skip = L.peek && pk_skipped(s.url); pthread_mutex_unlock(&L.mu);
-    if (skip) { fprintf(stderr, "[live] stream %d of the channel: passed over (no picture in the preview)\n", i + 1); continue; }
+    int i = L.next++; Stream s = L.s[i]; int skip = L.peek && pk_skipped(s.url), failedHere = ch_skipped(L.it.id, s.url); pthread_mutex_unlock(&L.mu);
+    if (skip || failedHere) { fprintf(stderr, "[live] stream %d of the channel: passed over (%s)\n", i + 1, failedHere ? "it failed in the player" : "no picture in the preview"); continue; }
     int ok = works(&s);
     pthread_mutex_lock(&L.mu); if (L.tok == tok && ok && !L.found) L.found = i + 1; pthread_mutex_unlock(&L.mu);
     fprintf(stderr, "[live] stream %d of the channel: %s\n", i + 1, ok ? "sends a picture" : "no picture");
@@ -350,7 +378,7 @@ void live_peek_set(const char *id, const Stream *s) { snprintf(PK.id, sizeof PK.
 int live_peek_stream(const char *id, Stream *out) { if (!id || strcmp(PK.id, id)) return 0; if (PK.st == 1 && out) *out = PK.s; return PK.st; }
 void live_peek_stop(void) { if (L.asked && L.peek) { pthread_mutex_lock(&L.mu); L.tok++; pthread_mutex_unlock(&L.mu); L.asked = 0; } PK.id[0] = 0; PK.st = 0; }
 const char *live_catalog_of(const char *id) { /* the catalog a channel is in (its title): kept once found, looked for again a second later when not */
-  static char last[64]; static const char *t; static unsigned g; static double at; if (!id) return NULL;
+  static char last[SB_ID]; static const char *t; static unsigned g; static double at; if (!id) return NULL;
   if (g == catGen && !strcmp(last, id) && (t || now_s() - at < 1)) return t; g = catGen; snprintf(last, sizeof last, "%s", id); t = NULL; at = now_s();
   for (int c = 0; c < ncat && !t; c++) for (int i = 0; i < cats[c].n; i++) if (!strcmp(cats[c].ch[i].id, id)) { t = cats[c].def.title; break; }
   return t; }
@@ -361,16 +389,16 @@ int live_reach(const char *id) { if (!id || !*id) return 0;
 
 /* ---- the channels on screen, tried one after another in the background (their streams asked for, the first that
    sends a picture marks the channel live, none: off air), so the marks are true before one is picked ---- */
-static struct { char id[64], type[16]; } PV[32]; static int npv;
-static struct { unsigned tok; char id[64]; double t0; int on, done; pthread_mutex_t mu; Stream s[MAXS]; int ns, next, busy, found; } PR = { .mu = PTHREAD_MUTEX_INITIALIZER };
+static struct { char id[SB_ID], type[16]; } PV[32]; static int npv;
+static struct { unsigned tok; char id[SB_ID]; double t0; int on, done; pthread_mutex_t mu; Stream s[MAXS]; int ns, next, busy, found; } PR = { .mu = PTHREAD_MUTEX_INITIALIZER };
 void live_probe_visible(const char *const *ids, const char *const *types, int n) {
   if (n > 32) n = 32; npv = n; for (int i = 0; i < n; i++) { snprintf(PV[i].id, sizeof PV[i].id, "%s", ids[i]); snprintf(PV[i].type, sizeof PV[i].type, "%s", types[i] && *types[i] ? types[i] : "tv"); } }
 static void pr_kick(void);
 static void *pr_run(void *arg) {
   unsigned tok = (unsigned)(uintptr_t)arg; plat_thread_background(5);
   for (;;) { pthread_mutex_lock(&PR.mu); if (PR.tok != tok || PR.found || PR.next >= PR.ns) { int stale = PR.tok != tok; PR.busy = 0; pthread_mutex_unlock(&PR.mu); if (stale) pr_kick(); return NULL; } /* (the next channel's check: started now) */
-    int i = PR.next++; Stream st = PR.s[i]; pthread_mutex_unlock(&PR.mu);
-    int ok = works(&st); pthread_mutex_lock(&PR.mu); if (PR.tok == tok && ok && !PR.found) PR.found = i + 1; pthread_mutex_unlock(&PR.mu); }
+    int i = PR.next++; Stream st = PR.s[i]; int failedHere = ch_skipped(PR.id, st.url); pthread_mutex_unlock(&PR.mu);
+    int ok = !failedHere && works(&st); pthread_mutex_lock(&PR.mu); if (PR.tok == tok && ok && !PR.found) PR.found = i + 1; pthread_mutex_unlock(&PR.mu); }
 }
 static void pr_kick(void) { pthread_mutex_lock(&PR.mu); int go = !PR.busy && !PR.found && PR.next < PR.ns; if (go) PR.busy = 1; unsigned tok = PR.tok; pthread_mutex_unlock(&PR.mu);
   if (go) { pthread_t th; if (pthread_create(&th, NULL, pr_run, (void *)(uintptr_t)tok)) { pthread_mutex_lock(&PR.mu); PR.busy = 0; pthread_mutex_unlock(&PR.mu); } else pthread_detach(th); } }
@@ -390,13 +418,31 @@ static void probe_tick(void) {
   npv = 0; /* (asked again each frame by whoever shows them) */
 }
 
-/* the stream playing failed in the player: the channel's next stream that sends a picture plays instead, quietly (the
-   corner pill tunes); 0 when none is left to try (the player then says it) */
-int live_failover(const char *id) {
-  if (!id || strcmp(L.it.id, id) || L.asked) return 0;
-  pthread_mutex_lock(&L.mu); int more = L.next < L.ns || !L.done; if (more) L.found = 0; pthread_mutex_unlock(&L.mu);
-  if (!more) return 0;
-  L.asked = 1; L.zap = 1; L.peek = 0; L.art = 0; L.fo = 1; L.t0 = now_s(); waitPic = 0;
-  cardIt = L.it; card.it = &cardIt; card.on = 1; card.tuning = 1; card.failed = 0; card.at = now_s();
-  fprintf(stderr, "[live] the stream failed in the player: the next one\n"); kick(); return 1;
+/* the stream playing failed in the player (an error, or no picture): the channel's next stream that sends a picture
+   plays instead, quietly (the corner pill tunes); 0 when none is left to try (the player then says it). The failed
+   address is passed over by every search for the channel for 10 minutes, and forgotten as its stream found. When the
+   channel's own search is no longer there (its stream came from the preview, from memory, or another channel was
+   looked for since), its streams are asked for again, that one passed over: before, it ended as "off air" */
+int live_failover(const char *id, const char *url) {
+  if (!id || !*id) return 0;
+  if (url && *url) ch_skip_add(id, url); live_found_drop(id); if (!strcmp(PK.id, id)) { PK.id[0] = 0; PK.st = 0; }
+  if (!strcmp(L.it.id, id) && !L.asked) {
+    pthread_mutex_lock(&L.mu); int more = L.next < L.ns || !L.done; if (more) L.found = 0; pthread_mutex_unlock(&L.mu);
+    if (!more) return 0;
+    L.asked = 1; L.zap = 1; L.peek = 0; L.art = 0; L.fo = 1; L.t0 = now_s(); waitPic = 0;
+    cardIt = L.it; card.it = &cardIt; card.on = 1; card.tuning = 1; card.failed = 0; card.at = now_s();
+    fprintf(stderr, "[live] the stream failed in the player: the next one\n"); kick(); return 1; }
+  if (L.asked && !L.peek) return 0; /* (a channel being started: it goes on) */
+  Item it; memset(&it, 0, sizeof it); int have = 0;
+  for (int i = 0; i < nline && !have; i++) if (!strcmp(lineup[i].id, id)) { live_item(&lineup[i], &it); have = 1; }
+  if (!have && cardIt.id[0] && !strcmp(cardIt.id, id)) { it = cardIt; have = 1; }
+  if (!have) { snprintf(it.id, sizeof it.id, "%s", id); snprintf(it.type, sizeof it.type, "tv"); }
+  pthread_mutex_lock(&L.mu); L.tok++; L.ns = L.next = L.found = 0; unsigned tok = L.tok; pthread_mutex_unlock(&L.mu);
+  L.it = it; L.zap = 1; L.peek = 0; L.art = 0; L.fo = 1; L.t0 = now_s(); L.asked = 1; L.done = 0; waitPic = 0;
+  cardIt = it; card.it = &cardIt; card.on = 1; card.tuning = 1; card.failed = 0; card.at = now_s();
+  fprintf(stderr, "[live] the stream failed in the player: its streams asked for again, that one passed over\n");
+  sb_streams(it.type, it.id, on_part, on_done, (void *)(uintptr_t)tok); return 1;
 }
+/* the channel's stream shows a picture in the player: kept as its found stream (a preview or OK opens it at once for 3
+   minutes), and no longer passed over */
+void live_found_keep(const char *id, const Stream *st) { if (!id || !*id || !st || !st->url[0]) return; found_set(id, st); ch_skip_clear(id, st->url); }

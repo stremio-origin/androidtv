@@ -14,6 +14,7 @@
 #include "screens/welcome.h"
 #include "screens/login.h"
 #include "screens/board.h"
+#include "screens/player.h"
 #include "ui/qr.h"
 #include "ui/gfx.h"
 #include "ui/text.h"
@@ -1104,14 +1105,14 @@ static int is_due(void) { if (due < 0) { int has = load(); const char *seen = st
 int welcome_ready(void) { return !is_due() || W.checked || preload(); }
 void welcome_tick(void) {
   if (W.open || (!W.checked && is_due())) { int r = preload(); static double since; if (!since) since = app_now(); if (!W.open && !r && app_now() - since < 4) return; } /* (kept fresh while it shows; it opens once they are in, 4 s at most) */
-  if (W.checked || W.open || !app_splash_done || SCR != SCR_HOME || app_overlay || app_idle() < 1.2f) return;
+  if (W.checked || W.open || !app_splash_done || SCR != SCR_HOME || app_overlay || app_idle() < 1.2f || player_open()) return; /* (a film loading or playing, a phone's too: never the guide over it; it waits for Home) */
   W.checked = 1; if (getenv("SB_STRESS")) return;
   int has = load(), forceG = env_on("SB_GUIDE"), forceW = env_on("SB_WHATSNEW");
   const char *seen = store_get("whatsNewSeen", ""); int first = !store_get("guideSeen", NULL) && !seen[0];
   if (forceG || (!forceW && first)) open_guide(1); else if (has && (forceW || strcmp(seen, W.ver))) open_guide(0);
 }
 void welcome_open_now(void) {
-  if (W.checked || W.open || getenv("SB_STRESS")) return;
+  if (W.checked || W.open || getenv("SB_STRESS") || player_open()) return; /* (a phone's film already starting: the guide waits for Home, welcome_tick) */
   W.checked = 1; int has = load(); const char *seen = store_get("whatsNewSeen", ""); int first = !store_get("guideSeen", NULL) && !seen[0];
   if (first) open_guide(1); else if (has && strcmp(seen, W.ver)) open_guide(0); else return;
   W.in.on = 0; W.fromSignIn = 1; /* already in: the loading fades off it, its glows carrying on */

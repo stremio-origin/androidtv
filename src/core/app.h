@@ -26,6 +26,7 @@ typedef struct { Item it; int openStreams; } DetailParams;
 extern Scr SCR;
 extern Screen *screens[SCR_N];
 extern Screen *app_overlay;
+void app_overlay_close(void);         /* the open overlay (the guide, a card, a menu) closed as Back would: a phone starting a film, a tab picked */
 void app_overlay_keep(Screen *s);     /* an overlay that draws something of its own while closed (an action's chip): drawn and ticked from now on */           /* a sheet or menu over the screen (streams, the card menu): keys go there first */
 void app_init(void);
 void app_register(Scr s, Screen *sc);

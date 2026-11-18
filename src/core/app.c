@@ -190,7 +190,7 @@ static const Swatch *first_ok(const Palette *p, int withMuted) {
   return NULL;
 }
 /* the colours found for a title, kept across runs (store node "tintMem2": id -> {cover:[..], logo:[..]}) */
-typedef struct { char id[64], poster[512], logo[512]; int artDone, logoDone; Palette art, logo_; double at; } TintJob;
+typedef struct { char id[SB_ID], poster[512], logo[512]; int artDone, logoDone; Palette art, logo_; double at; } TintJob;
 static TintJob tintJobs[8];
 static cJSON *tint_mem(void) { cJSON *m = store_node("tintMem2"); if (!m) { m = cJSON_CreateObject(); store_set_node("tintMem2", m); } return m; }
 static int tint_for(const char *id, uint32_t out[4]) {
@@ -199,7 +199,7 @@ static int tint_for(const char *id, uint32_t out[4]) {
   for (int i = 0; i < 4; i++) out[i] = (uint32_t)cJSON_GetArrayItem(a, i)->valuedouble;
   return 1;
 }
-static char scopeId[64], scopePoster[512], scopeLogo[512];
+static char scopeId[SB_ID], scopePoster[512], scopeLogo[512];
 static void tint_settle(TintJob *j) {
   const Swatch *ca = first_ok(&j->art, 1), *cl = first_ok(&j->logo_, 0);
   cJSON *e = cJSON_CreateObject(); uint32_t c[4];
@@ -209,7 +209,7 @@ static void tint_settle(TintJob *j) {
   cJSON *m = tint_mem(); cJSON_DeleteItemFromObject(m, j->id); cJSON_AddItemToObject(m, j->id, e);
   while (cJSON_GetArraySize(m) > 200) cJSON_DeleteItemFromArray(m, 0); /* oldest out */
   store_set_node("tintMem2", cJSON_Duplicate(m, 1));
-  char id[64]; snprintf(id, sizeof id, "%s", j->id); j->id[0] = 0;
+  char id[SB_ID]; snprintf(id, sizeof id, "%s", j->id); j->id[0] = 0;
   if (scopeId[0] && !strcmp(scopeId, id)) accent_scope(scopeId, scopePoster, scopeLogo); /* the page waiting for it */
 }
 void accent_tint_fetch(const char *id, const char *poster, const char *logo) {
@@ -250,7 +250,7 @@ void accent_scope(const char *id, const char *poster, const char *logo) {
 static char toastMsg[256], toastKey[32]; static double toastUntil; static Tween toastA; static int toastOn, toastKind; static Timer1 toastNew;
 /* the icon a notice carries: working on it (ends in an ellipsis), something went wrong, or done. Read from the
    English text (screens pass it translated: looked up back) */
-enum { TK_NONE, TK_WORK, TK_ERR, TK_OK };
+enum { TK_NONE, TK_WORK, TK_ERR, TK_OK, TK_PHONE };
 static int has_ci(const char *s, const char *w) { size_t n = strlen(w); for (; *s; s++) if (!strncasecmp(s, w, n)) return 1; return 0; }
 static int toast_kind_of(const char *m) {
   size_t n = strlen(m); if ((n >= 3 && !strcmp(m + n - 3, "\xe2\x80\xa6")) || (n >= 3 && !strcmp(m + n - 3, "..."))) return TK_WORK;
@@ -258,6 +258,7 @@ static int toast_kind_of(const char *m) {
   static const char *er[] = { "fail", "could not", "couldn", "unavailable", "no trailer", "no embedded", "needs a", "error", "nothing to" };
   static const char *ok[] = { "updated", "signed in", "in english", "in your language", "latest version", "synced", "saved" };
   for (int i = 0; i < 9; i++) if (has_ci(m, er[i])) return TK_ERR;
+  if (has_ci(m, "phone")) return TK_PHONE; /* (a phone connected, gone, or its settings: the phone's own mark, never a plain card; a failure still says failure) */
   for (int i = 0; i < 7; i++) if (has_ci(m, ok[i])) return TK_OK;
   return TK_NONE;
 }
@@ -277,6 +278,7 @@ static void toast_draw(void) {
   int keyG = !strcmp(toastKey, "\001back"), liveG = !strcmp(toastKey, "\002live"); /* the remote's Back key, drawn; a red LIVE chip */
   if (toastKey[0]) keyW = keyG ? 38 + 14 - 6 : liveG ? 26 + text_width(T("LIVE"), 20, 800, 1.2f) + 14 - 6 : 24 + text_width(toastKey, 21, 600, 0) + 14 - 6;
   float w = 56 + kindW + keyW + tw, h = 72, x = SB_W / 2 - w / 2, y = SB_H - 64 - h + 36 * (1 - a);
+  { extern int welcome_is_open(void), supportcard_covers(void); if (welcome_is_open() || supportcard_covers()) y -= 92; } /* (with the guide or the support card up, fading in too: above their footer of hints, never on it) */
   gfx_opacity_push(a);
   gfx_shadow(x, y + 16, w, h, 18, 40, BLACK_A(115));
   gfx_rrect(x, y, w, h, 18, RGB(0x1f, 0x1c, 0x28)); gfx_ring(x, y, w, h, 18, 1, WHITE_A(15));
@@ -286,6 +288,7 @@ static void toast_draw(void) {
       gfx_ring(ix, iy, 26, 26, 13, 3, WHITE_A(41)); float a0 = fmodf((float)NOW / 0.8f, 1) * 360;
       for (int k = 0; k <= 12; k++) { float an = (a0 + k * 7.5f - 45) * (float)M_PI / 180; gfx_circle(ix + 13 + 11.5f * sinf(an), iy + 13 - 11.5f * cosf(an), 1.5f, ACC3); } }
     else if (toastKind == TK_ERR) { gfx_circle(ix + 13, iy + 13, 13, RGBA(239, 143, 138, 46)); gfx_rrect(ix + 11, iy + 6, 4, 9, 2, RGB(0xef, 0x8f, 0x8a)); gfx_rrect(ix + 11, iy + 17, 4, 4, 2, RGB(0xef, 0x8f, 0x8a)); }
+    else if (toastKind == TK_PHONE) { gfx_circle(ix + 13, iy + 13, 13, ACC); icon_draw("g_phone", ix + 5, iy + 5, 16, ACC_FG); }
     else { gfx_circle(ix + 13, iy + 13, 13, ACC); icon_draw("check", ix + 4, iy + 4, 18, ACC_FG); }
     cx += rtl ? -kindW : kindW; }
   if (keyG) { key_hint(rtl ? cx + 6 : cx - 6, y + h / 2, K_BACK, NULL, WHITE_A(235), rtl); cx += rtl ? -keyW : keyW; }
@@ -485,9 +488,10 @@ static void corner_draw(int i, const char *icon, uint32_t dot, float rot) {
   if (nd) gfx_offset_pop();
   if (sf < 0.999f) gfx_opacity_pop();
 }
+void app_overlay_close(void) { if (app_overlay) { app_overlay->key(K_BACK); app_overlay = NULL; } } /* the guide, a card or a menu closed as Back closes it (its marks kept as usual): something else opens over everything */
 static void chip_focus(int i, int b) { (void)b; if (!topNav.active || topNav.idx != i) { topnav_flush(1); if (!topNav.active) { topNav.active = 1; } topNav.idx = i; topnav_paint(); } }
 static void chip_act(int i, int b) { (void)b; Scr tg = chipScr(i); Scr cur = (SCR == SCR_DETAIL || SCR == SCR_SIM) ? SCR_HOME : SCR; int ci = -1; for (int j = 2; j < 5; j++) if (chipScr(j) == cur) ci = j;
-  if (app_overlay) { app_overlay->key(K_BACK); app_overlay = NULL; }
+  app_overlay_close();
   topnav_flush(1); topNav.active = 1; topNav.idx = i;
   if (tg == SCR_SEARCH || tg == SCR_SET) topnav_key(K_OK); /* opens it, the highlight inside */
   else if (i != ci || !app_is_board(SCR)) { topNav.idx = -1; topnav_switch(i); }
@@ -548,7 +552,7 @@ void topnav_draw(void) {
   if (rv < 1) gfx_opacity_pop();
   lglass_light(0); if (!welcome_is_open()) { float ck = (1 - ma * ma * (3 - 2 * ma)) * (1 - pg); if (ck < 1) gfx_opacity_push(ck); if (lift < 0) gfx_offset_push(0, lift); clock_draw(); if (lift < 0) gfx_offset_pop(); if (ck < 1) gfx_opacity_pop(); } /* the clock: never faded in with the page (it stays where it is through signing in, the start screen and the guide); away only with the bar for a trailer or the reviews */
 }
-void app_clock_top(void) { if (splash_signed_in() || welcome_is_open()) { lglass_light(0); clock_draw(); } } /* over the start screen and the guide: the same clock, in its place */
+void app_clock_top(void) { extern int welcome_covers(void); if (splash_signed_in() || welcome_covers()) { lglass_light(0); clock_draw(); } } /* (only while the guide really covers the page: a guide left open under a film drew Home's clock over the player's) */ /* over the start screen and the guide: the same clock, in its place */
 
 /* ---- the backdrop: two layers, the new one fades in over the old (never a dip to black) ---- */
 #define BGW 1280
@@ -827,12 +831,15 @@ static void key_core(int k, int down, int repeat);
 #define PTR_ARROW_DIST 32
 #define PTR_ARROW_PAUSE 0.3
 static struct { int on; float x, y; Hit hv; int hasHv; float hx, hy; double movedAt; int down, downAct; Hit act; double okKeyAt, clickAt, wheelAt; int eatUp, eatOk, arrowHid; double arrowAt; int anchor; float ax, ay; double tremAt; int dirty; double activeAt; int tvHid, okPtr; } PTR;
+/* a platform with no say over its pointer (no plat_pointer_can_hide of its own): the app's pointer goes away after a
+   while by itself, as before */
+__attribute__((weak)) int plat_pointer_can_hide(void) { return 1; }
 static void ptr_show(void) { PTR.arrowHid = 0; PTR.activeAt = NOW; if (PTR.tvHid) { PTR.tvHid = 0; plat_pointer_visible(1); } if (PTR.on) return; PTR.on = 1; PTR.hasHv = 0; }
 static void ptr_hide(void) { if (!PTR.on) return; PTR.on = 0; PTR.hasHv = 0; }
-static void ptr_put_away(void) { int was = PTR.on; ptr_hide(); if (was && !PTR.tvHid) { PTR.tvHid = 1; plat_pointer_visible(0); } } /* the TV's own pointer too, as its own apps do (the app's state alone left it on screen) */
+static void ptr_put_away(void) { ptr_hide(); if (!PTR.tvHid) { PTR.tvHid = 1; plat_pointer_visible(0); } } /* the TV's own pointer too, as its own apps do (the app's state alone left it on screen) */
 void app_pointer_rest(void) { if (PTR.on && !PTR.down) ptr_put_away(); } /* the film's controls faded by themselves: the pointer goes with them */
 #define PTR_IDLE 5.0 /* a hand held still this long: the pointer goes away, as on the TV's own screens */
-static void ptr_idle(void) { if (PTR.on && !PTR.down && NOW - PTR.activeAt > PTR_IDLE) ptr_put_away(); } /* (never while a press is held: a long press, the seek bar dragged) */
+static void ptr_idle(void) { if (!PTR.down && (PTR.on || !PTR.tvHid) && NOW - PTR.activeAt > PTR_IDLE && plat_pointer_can_hide()) ptr_put_away(); } /* (the TV's pointer up while the app's waits for a real movement (after an arrow, the hand took the remote): it goes too) */ /* (never while a press is held: a long press, the seek bar dragged) */
 static int ptr_tremor(double now) { if (!PTR.arrowHid) return 0; if (now - PTR.arrowAt < PTR_ARROW_WIN) return 1;
   if (!PTR.anchor || now - PTR.tremAt > PTR_ARROW_PAUSE) { PTR.anchor = 1; PTR.ax = PTR.x; PTR.ay = PTR.y; } PTR.tremAt = now; float dx = PTR.x - PTR.ax, dy = PTR.y - PTR.ay; return dx * dx + dy * dy < PTR_ARROW_DIST * PTR_ARROW_DIST; }
 static void ptr_nav_back(void) { if (topNav.want >= 0) return; Scr cur = (SCR == SCR_DETAIL || SCR == SCR_SIM) ? SCR_HOME : SCR; for (int j = 2; j < 5; j++) if (chipScr(j) == cur && topNav.idx != j) { topNav.idx = j; topnav_paint(); } }
@@ -853,7 +860,7 @@ static void ptr_frame(void) { if (player_open()) { if (PTR.on) ptr_hush(); PTR.d
   if (!d || !d->focus || (PTR.hasHv && hit_same(d, &PTR.hv))) return;
   if (PTR.movedAt && now - PTR.movedAt < PTR_SETTLE) { PTR.dirty = 1; return; } /* the page is still moving under the pointer */
   d->focus(d->a, d->b); ptr_keep(d); }
-void app_pointer_move(float x, float y) { if (x == PTR.x && y == PTR.y) return; PTR.x = x; PTR.y = y; if (player_open()) { ptr_hush(); return; } if (ptr_tremor(NOW)) return; ptr_show(); idle_touch_by("pointer moved"); PTR.dirty = 1; }
+void app_pointer_move(float x, float y) { if (x == PTR.x && y == PTR.y) return; PTR.x = x; PTR.y = y; if (player_open()) { ptr_hush(); return; } if (ptr_tremor(NOW)) { PTR.activeAt = NOW; return; } /* (a hand still moving keeps the TV's pointer up) */ ptr_show(); idle_touch_by("pointer moved"); PTR.dirty = 1; }
 void app_pointer_button(int down, float x, float y) {
   double now = NOW; PTR.x = x; PTR.y = y;
   if (saver_on()) return; /* the screensaver covers the page: nothing under it is pressed */
@@ -874,8 +881,12 @@ void app_pointer_button(int down, float x, float y) {
   const Hit *d = hit_at(x, y); if (d && hit_same(d, &PTR.act)) PTR.act.act(PTR.act.a, PTR.act.b); /* released on it: its own action */
 }
 /* the wheel = the Up/Down arrows (Left/Right for a sideways wheel), one per notch; it leaves the pointer out */
-void app_pointer_wheel(float dx, float dy) { double now = NOW; if (saver_on()) return; if (now - PTR.wheelAt < PTR_WHEEL || (!dx && !dy)) return; PTR.wheelAt = now; idle_touch(); int k = dy > 0 ? K_UP : dy < 0 ? K_DOWN : dx > 0 ? K_RIGHT : K_LEFT; key_core(app_mirror_key(k), 1, 0); key_core(k, 0, 0); }
-void app_pointer_system(int show) { if (!show) { ptr_hide(); return; } if (player_open()) { ptr_hush(); return; } if (PTR.arrowHid) return; ptr_show(); }
+void app_pointer_wheel(float dx, float dy) { double now = NOW; if (saver_on()) return; if (now - PTR.wheelAt < PTR_WHEEL || (!dx && !dy)) return; PTR.wheelAt = now; PTR.activeAt = now; idle_touch(); /* (scrolling is use: the pointer stays up) */ int k = dy > 0 ? K_UP : dy < 0 ? K_DOWN : dx > 0 ? K_RIGHT : K_LEFT; key_core(app_mirror_key(k), 1, 0); key_core(k, 0, 0); }
+void app_pointer_system(int show) { if (!show) { ptr_hide(); return; } if (player_open()) { ptr_hush(); return; }
+  if (PTR.arrowHid) { if (NOW - PTR.arrowAt < PTR_ARROW_WIN) { PTR.tvHid = 1; plat_pointer_visible(0); } /* the TV's pointer woken by the tremble of an arrow press: put away again */
+    else if (PTR.tvHid) { PTR.tvHid = 0; PTR.activeAt = NOW; plat_pointer_visible(1); } /* the hand took the remote: the TV's pointer back (hiding it again here locked it on a TV that sends no movement while it is hidden), the app's own waits for a real movement */
+    return; }
+  ptr_show(); }
 void app_key(int k, int down, int repeat) {
   if (k == K_CURSOR_SHOW || k == K_CURSOR_HIDE) { if (down) app_pointer_system(k == K_CURSOR_SHOW); return; } /* a notice from the TV, not a key */
   if (k == K_INFO) { if (down && !repeat) { int on = strcmp(store_get("nerdStats", "false"), "true") != 0; store_set("nerdStats", on ? "true" : "false"); toast(on ? T("Stats for nerds on") : T("Stats for nerds off"), 1500, NULL); fprintf(stderr, "[app] Info: stats for nerds %s\n", on ? "on" : "off"); } return; } /* (the remote's Info key, wherever you are) */
