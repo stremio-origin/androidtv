@@ -91,6 +91,24 @@ int plat_display_hz(void) { JNIEnv *e = atv_env(); static jmethodID m; if (!m) m
   float hz = (*e)->CallStaticFloatMethod(e, atv_class(e, 0), m); if (!atv_check(e) || !(hz > 1)) return 0; return (int)(hz + 0.5f); }
 void atv_call_int(const char *name, int v) { JNIEnv *e = atv_env(); jmethodID m = atv_method(e, 0, name, "(I)V"); if (m) { (*e)->CallStaticVoidMethod(e, atv_class(e, 0), m, (jint)v); atv_check(e); } }
 
+/* a JPEG decoded by Android at the smallest power-of-two size still covering bw x bh (MainActivity.decodeJpeg): RGBA
+   pixels (malloc) and their size, or NULL. Called from the picture workers (each attached to Java by SDL); every
+   local reference let go at once: a worker lives as long as the app */
+unsigned char *atv_jpeg_decode(const unsigned char *data, size_t len, int bw, int bh, int *w, int *h) {
+  JNIEnv *e = atv_env(); static jmethodID m; static int none; if (none || !e) return NULL;
+  if (!m) { m = atv_method(e, 0, "decodeJpeg", "([BII)[B"); if (!m) { none = 1; return NULL; } }
+  jbyteArray in = (*e)->NewByteArray(e, (jsize)len); if (!in) { (*e)->ExceptionClear(e); return NULL; }
+  (*e)->SetByteArrayRegion(e, in, 0, (jsize)len, (const jbyte *)data);
+  jbyteArray out = (jbyteArray)(*e)->CallStaticObjectMethod(e, atv_class(e, 0), m, in, (jint)bw, (jint)bh);
+  (*e)->DeleteLocalRef(e, in); if (!atv_check(e) || !out) { if (out) (*e)->DeleteLocalRef(e, out); return NULL; }
+  unsigned char *px = NULL; jsize n = (*e)->GetArrayLength(e, out); unsigned char hd[8];
+  if (n >= 8) { (*e)->GetByteArrayRegion(e, out, 0, 8, (jbyte *)hd);
+    int ow = hd[0] | hd[1] << 8 | hd[2] << 16 | hd[3] << 24, oh = hd[4] | hd[5] << 8 | hd[6] << 16 | hd[7] << 24;
+    if (ow > 0 && oh > 0 && (long)n == 8 + (long)ow * oh * 4 && (px = malloc((size_t)ow * oh * 4))) { (*e)->GetByteArrayRegion(e, out, 8, ow * oh * 4, (jbyte *)px); *w = ow; *h = oh;
+      static int said; if (!said) { said = 1; fprintf(stderr, "[img] jpeg: Android's own decoder, scaled (first: %dx%d for a %dx%d box)\n", ow, oh, bw, bh); } } }
+  (*e)->DeleteLocalRef(e, out); return px;
+}
+
 /* ---- the remote: keys Java takes before SDL (colour keys, channel keys, the media keys, Menu), as key events ---- */
 JNIEXPORT void JNICALL Java_app_stremioorigin_tv_MainActivity_nativeTvKey(JNIEnv *env, jclass c, jint code, jboolean down, jint repeat) {
   (void)env; (void)c; SDL_Event ev; memset(&ev, 0, sizeof ev);

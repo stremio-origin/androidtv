@@ -5,6 +5,9 @@
    core/, ui/ and screens/. */
 #include <SDL2/SDL.h>
 #include <stdio.h>
+#ifdef SB_ANDROIDTV
+#include <dlfcn.h>
+#endif
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,16 +291,24 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[start] %s window %dx%d drawable %dx%d\n", plat_device_name(), w, h, dw, dh);
   if (!gfx_init(dw, dh)) return 1;
 #ifdef SB_ANDROIDTV
-  { /* Android TV draws at 1280x720 into a picture of its own, copied scaled to the whole screen at the end of each frame:
-       a third of 1080p's pixels to fill and blend, the part a weak box's GPU spends most of its frame on. The window and
-       the surface stay 1920x1080 (the pointer and the video plane read them as before). SB_RES=1080 (or "full") draws at
-       the screen's size */
-    const char *r = getenv("SB_RES"); int want = !r || (strcmp(r, "1080") && strcmp(r, "full"));
+  { int fullW0 = dw, fullH0 = dh; /* Android TV on a weak GPU draws at 1280x720 into a picture of its own, copied scaled to the whole screen
+       at the end of each frame: a third of 1080p's pixels to fill and blend, the part such a box's GPU spends most of its
+       frame on. The window and the surface stay 1920x1080 (the pointer and the video plane read them as before). Which
+       boxes: a short measurement at the start (one full-screen layer at the screen's size, the GPU waited for). A capable
+       box (a Shield: well under a millisecond) draws at the screen's own size, sharp; a weak one (a Mali-450 class box:
+       several) at 720p. SB_RES=720 / 1080 decides instead */
+    const char *r = getenv("SB_RES"); double lay = r ? 0 : gfx_layer_ms(dw, dh); int lowMem = memMb > 0 && memMb < 1500;
+    int want = r ? strcmp(r, "1080") && strcmp(r, "full") : (lowMem || lay <= 0 || lay > 2.0); /* (a box with under 1.5 GB: every picture at 1080 is 2.25 times the memory; they were let go and loaded again over and over) */
     if (want && dh > 720 && gfx_target_create(&atvLow, 1280, 720)) { gfx_set_screen_fbo(atvLow.fbo); gfx_resize(1280, 720); dw = 1280; dh = 720; }
-    fprintf(stderr, "[start] drawing at %dx%d%s\n", dw, dh, atvLow.fbo ? ", scaled to the screen" : "");
+    { const char *gr = (const char *)glGetString(GL_RENDERER); fprintf(stderr, "[perf] GPU %s: a full-screen layer at %dx%d takes %s%.2f ms -> drawing at %dx%d%s (%s)\n", gr ? gr : "?", fullW0, fullH0, lay > 0 ? "" : "? ", lay, dw, dh,
+        atvLow.fbo ? ", scaled to the screen" : "", r ? "SB_RES" : lowMem ? "under 1.5 GB of memory: the light size" : lay <= 0 ? "not measured: the light size" : lay > 2.0 ? "a weak GPU: the light size" : "a capable GPU: full size"); }
     /* a frame the same as the last one is not drawn again: still on the screen (a page at rest, the background trailer
        under a still page), the GPU does nothing and the box's memory and CPU are the video's. SB_STILL=0: every frame drawn */
-    gfx_still(!getenv("SB_STILL") || atoi(getenv("SB_STILL"))); }
+    gfx_still(!getenv("SB_STILL") || atoi(getenv("SB_STILL")));
+    { /* pictures to the GPU: about 3 ms of this box's own rate each frame (the LG TV's measured 320 KB was a guess here) */
+      double kbms = gfx_upload_kb_ms(); long bud = kbms > 0 ? (long)(kbms * 3 * 1024) : 0;
+      if (bud) { if (bud < 192L * 1024) bud = 192L * 1024; if (bud > 3L * 1024 * 1024) bud = 3L * 1024 * 1024; extern void img_set_upload_budget(long); img_set_upload_budget(bud); }
+      fprintf(stderr, "[perf] pictures to the GPU at %.0f KB/ms -> %ld KB a frame\n", kbms, bud ? bud / 1024 : 320); } }
 #endif
   video_set_surface(dw, dh); /* the TV reads the video plane's rectangle in the drawable's pixels (720p light: 1280x720) */
 #ifdef SB_MAC
@@ -341,6 +352,14 @@ int main(int argc, char **argv) {
       if (getenv("SB_EVLOG") || frame < 120) if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_WINDOWEVENT) fprintf(stderr, "[ev] type=%d%s sc=%d sym=%d win=%d\n", e.type, e.type == SDL_QUIT ? " QUIT" : "", e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.scancode : 0, e.type == SDL_KEYDOWN || e.type == SDL_KEYUP ? e.key.keysym.sym : 0, e.type == SDL_WINDOWEVENT ? e.window.event : 0);
       if (e.type == SDL_QUIT) { fprintf(stderr, "[exit] SDL_QUIT\n"); app_quit(); }
       else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) { int k = plat_map_key(&e.key);
+#ifdef SB_ANDROIDTV
+        /* a held arrow: its repeats at most every 80 ms across, 112 ms up and down, and one a frame; a slow box no longer
+           queues them faster than it draws (the focus ran on after the key was let go) */
+        if (e.type == SDL_KEYDOWN && e.key.repeat && (k == K_LEFT || k == K_RIGHT || k == K_UP || k == K_DOWN)) {
+          static Uint32 lastAt; static unsigned lastFrame; Uint32 now = SDL_GetTicks(), gap = (k == K_UP || k == K_DOWN) ? 112 : 80;
+          if (now - lastAt < gap || lastFrame == (unsigned)frame) continue;
+          lastAt = now; lastFrame = (unsigned)frame; }
+#endif
         if (k == K_BACK && e.key.keysym.sym == SDLK_ESCAPE && e.type == SDL_KEYDOWN && SCR == SCR_LOGIN) app_quit();
         if (k) app_key(k, e.type == SDL_KEYDOWN, e.key.repeat); }
       else if (e.type == SDL_TEXTINPUT) app_text(e.text.text);
@@ -411,7 +430,18 @@ int main(int argc, char **argv) {
     if (getenv("SB_STATS")) { char fs[96]; snprintf(fs, sizeof fs, "%d fps  %d calls  %d quads  %d MB", fps, gfx_draw_calls(), gfx_quads(), img_used_mb()); text_draw(fs, 1870, 1030, 22, 500, WHITE_A(120), 0, 0, ALIGN_RIGHT); }
     gfx_end();
     Uint32 tC = SDL_GetTicks(); accEnd += tC - tB;
+#ifdef SB_ANDROIDTV
+    { /* a film on a box with little memory (under 2.3 GB): the pages' pictures, unseen under it for two seconds, are let
+         go down to 8 MB, and the kept spare textures freed, so the decoder and the player's buffer have the room; they
+         come back from their small copies when the film closes */
+      static int small = -1; static int was; if (small < 0) { int mb = plat_mem_total_mb(); small = mb > 0 && mb < 2300; }
+      int film = small && player_open() && (player_live() || player_art_full()); /* (from the moment the loading picture covers the page: before the decoder takes its memory, and nothing under it shows) */
+      if (film) { img_release_unused(8); gfx_pool_clear(); } else img_release_unused(0);
+      if (film != was) { fprintf(stderr, "[mem] %s\n", film ? "a film: the pages' pictures let go (a small box)" : "the film closed: pictures as before"); was = film;
+        if (film) { int (*mo)(int, int) = (int (*)(int, int))dlsym(RTLD_DEFAULT, "mallopt"); if (mo) mo(-101 /* M_PURGE */, 0); } } } /* (the freed native memory handed back to the system: Android 9 and up, a no-op before) */
+#else
     img_release_unused(0);
+#endif
     Uint32 tCpu1 = SDL_GetTicks(); accPump += tCpu1 - tC;
     static int glFinishDev = -1; if (glFinishDev < 0) glFinishDev = getenv("SB_GLFINISH") != NULL; /* development: the GPU's own time shows as "gpu" */
     Uint64 tG0 = SDL_GetPerformanceCounter(); if (glFinishDev) glFinish(); Uint64 tG1 = SDL_GetPerformanceCounter();
@@ -467,16 +497,10 @@ int main(int argc, char **argv) {
 #ifdef SB_MAC
     if (stress_on()) pace_wait((double)(tSwap - tCpu0) + accPreFrame); else SDL_Delay(16); /* a stress run on the Mac checks the run itself (its numbers are not the TV's) */
 #else
-#ifdef SB_ANDROIDTV
-    { /* over a playing film, while its controls (or a tray) are up: no vsync, the loop paces itself, so a press shows
-         without waiting for the next refresh (the film is on its own plane: its frames never wait for ours) */
-      static int base = -1; if (base < 0) base = vsyncOn;
-      int want = base && !player_controls_up();
-      if (want != vsyncOn) { vsyncOn = want; SDL_GL_SetSwapInterval(vsyncOn); fprintf(stderr, "[pace] vsync %s\n", vsyncOn ? "on" : "off (player controls up)"); } }
-#endif
     { int pm = profN; if (!vsyncOn || stillFrame) pace_wait((double)(tSwap - tCpu0) + accPreFrame); else pace_observe(); if (profSlow) profN = pm; } /* the wait is not the frame's */
 #endif
-    frames++; frame++; if (frame == 1 || frame == 10 || frame % 300 == 0) { { int q, w; img_queue_stats(&q, &w); fprintf(stderr, "[frame] pictures: %d queued, %d to upload\n", q, w); } fprintf(stderr, "[frame] %d drawn, %d fps, %d MB of pictures, cpu %.1f ms (pumps %.1f tick %.1f draw %.1f flush %.1f evict %.1f), swap %.1f ms, %d calls %d quads\n", frame, fps, img_used_mb(), accN ? accCpu / accN : 0, accN ? accPre / accN : 0, accN ? accTick / accN : 0, accN ? accDraw / accN : 0, accN ? accEnd / accN : 0, accN ? accPump / accN : 0, accN ? accSwap / accN : 0, gfx_draw_calls(), gfx_quads()); { char pr[256]; pace_report(pr, sizeof pr); fprintf(stderr, "[frame] %s\n", pr); } if (getenv("SB_MIDLOG")) { extern int gfx_mid_switches(void); fprintf(stderr, "[mid] %d mid-frame target switches since the last line\n", gfx_mid_switches()); } if (getenv("SB_FILL")) { char fr[300]; gfx_fill_report(fr, sizeof fr); fprintf(stderr, "[fill] %s %s\n", stress_screen(), fr); } { double lm, wm; int r, sh, lk; text_stats(&lm, &wm, &r, &sh, &lk); fprintf(stderr, "[frame] gl flushes %.1f ms per frame; text: lines %.1f ms, widths %.1f ms, %d rasterised, %d shaped, %d lookups (per frame over %d)\n", accN ? gfx_flush_ms(1) / accN : 0, accN ? lm / accN : 0, accN ? wm / accN : 0, r, sh, lk, accN); } accCpu = accSwap = accPre = accTick = accDraw = accEnd = accPump = 0; accN = 0;
+    frames++; frame++; static int statEvery = -1; if (statEvery < 0) { statEvery = getenv("SB_FRAMEEVERY") ? atoi(getenv("SB_FRAMEEVERY")) : 300; if (statEvery < 30) statEvery = 300; } /* (development: the frame lines more often) */
+    if (frame == 1 || frame == 10 || frame % statEvery == 0) { { int q, w; img_queue_stats(&q, &w); fprintf(stderr, "[frame] pictures: %d queued, %d to upload\n", q, w); } fprintf(stderr, "[frame] %d drawn, %d fps, %d MB of pictures, cpu %.1f ms (pumps %.1f tick %.1f draw %.1f flush %.1f evict %.1f), swap %.1f ms, %d calls %d quads\n", frame, fps, img_used_mb(), accN ? accCpu / accN : 0, accN ? accPre / accN : 0, accN ? accTick / accN : 0, accN ? accDraw / accN : 0, accN ? accEnd / accN : 0, accN ? accPump / accN : 0, accN ? accSwap / accN : 0, gfx_draw_calls(), gfx_quads()); { char pr[256]; pace_report(pr, sizeof pr); fprintf(stderr, "[frame] %s\n", pr); } if (getenv("SB_MIDLOG")) { extern int gfx_mid_switches(void); fprintf(stderr, "[mid] %d mid-frame target switches since the last line\n", gfx_mid_switches()); } if (getenv("SB_FILL")) { char fr[300]; gfx_fill_report(fr, sizeof fr); fprintf(stderr, "[fill] %s %s\n", stress_screen(), fr); } { double lm, wm; int r, sh, lk; text_stats(&lm, &wm, &r, &sh, &lk); fprintf(stderr, "[frame] gl flushes %.1f ms per frame; text: lines %.1f ms, widths %.1f ms, %d rasterised, %d shaped, %d lookups (per frame over %d)\n", accN ? gfx_flush_ms(1) / accN : 0, accN ? lm / accN : 0, accN ? wm / accN : 0, r, sh, lk, accN); } accCpu = accSwap = accPre = accTick = accDraw = accEnd = accPump = 0; accN = 0;
 #ifndef SB_MAC
       if (getenv("SB_PROF")) prof_report();
 #endif

@@ -417,6 +417,26 @@ public class MainActivity extends SDLActivity {
         return false;
     }
 
+    /* a JPEG by Android's own decoder (the box's libjpeg-turbo, NEON), at a half, quarter or eighth of its size when that
+       still covers w x h: much less work than the whole picture decoded and then shrunk (src: img.c). Returned as
+       {width, height (4 bytes each, little-endian), then the RGBA pixels}, or null (the app's own decoder then) */
+    public static byte[] decodeJpeg(byte[] data, int w, int h) {
+        try {
+            android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options(); o.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, o);
+            int w0 = o.outWidth, h0 = o.outHeight; if (w0 <= 0 || h0 <= 0) return null;
+            int n = 1; while (n < 8 && (w0 + 2 * n - 1) / (2 * n) >= w && (h0 + 2 * n - 1) / (2 * n) >= h) n *= 2;   /* (cover: both sides at least the box) */
+            o = new android.graphics.BitmapFactory.Options(); o.inSampleSize = n; o.inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888; o.inScaled = false;
+            android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, o); if (b == null) return null;
+            int bw = b.getWidth(), bh = b.getHeight();
+            if (b.getConfig() != android.graphics.Bitmap.Config.ARGB_8888 || b.getRowBytes() != bw * 4) { b.recycle(); return null; }
+            byte[] out = new byte[8 + bw * bh * 4];
+            b.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(out, 8, bw * bh * 4)); b.recycle();   /* (ARGB_8888 is R, G, B, A in memory) */
+            out[0] = (byte) bw; out[1] = (byte) (bw >> 8); out[2] = (byte) (bw >> 16); out[3] = (byte) (bw >> 24);
+            out[4] = (byte) bh; out[5] = (byte) (bh >> 8); out[6] = (byte) (bh >> 16); out[7] = (byte) (bh >> 24);
+            return out;
+        } catch (Throwable t) { return null; }
+    }
     /* the drawing surface's size, fixed (the TV scales it to the screen): 1080 or 720 lines (src: plat_window_size) */
     public static void surfaceSize(int lines) {
         final MainActivity a = self; if (a == null) return;

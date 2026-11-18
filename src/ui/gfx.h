@@ -78,6 +78,8 @@ typedef struct { GLuint tex, fbo; int w, h; } GfxTarget;
 int  gfx_target_create(GfxTarget *t, int w, int h);   /* 0 when the driver cannot draw into textures */
 void gfx_target_free(GfxTarget *t);
 void gfx_upscale(unsigned tex, int screenW, int screenH);
+double gfx_upload_kb_ms(void); /* pictures to the GPU: KB a millisecond on this box (0 unknown) */
+double gfx_layer_ms(int w, int h); /* the GPU's time for one full-screen blended layer at w x h (ms; 0 unknown) */
 void gfx_still(int on);          /* Android TV: a frame the same as the last one is not drawn again (see gfx.c) */
 void gfx_still_reset(void);      /* the screen lost its frame: the next is drawn */
 int  gfx_still_skipped(void);    /* after gfx_end: 1 when this frame was the last one again (nothing to swap) */

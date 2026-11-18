@@ -36,3 +36,4 @@ int    img_used_mb(void);
 void   img_cover_uv(float ta, float ba, int anchorTop, float *u0, float *v0, float *u1, float *v1);
 #endif
 void   img_queue_stats(int *queued, int *waiting); /* development: decodes queued, decoded pictures waiting for upload */
+void img_set_upload_budget(long bytes); /* pictures sent to the GPU per frame (bytes): the box's measured rate (Android TV) */

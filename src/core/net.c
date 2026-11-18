@@ -163,6 +163,21 @@ static pthread_key_t tlsKey; static pthread_once_t tlsOnce = PTHREAD_ONCE_INIT;
 static void tls_end(void *c) { if (c) f_easy_cleanup((CURL *)c); }
 static void tls_key(void) { pthread_key_create(&tlsKey, tls_end); }
 #endif
+/* 32-bit Android TV: this build has no AES instructions to use (mbedTLS's are ARMv8-only), so ChaCha20 is offered first
+   for TLS 1.3, about three times quicker in software on these boxes' cores; the AES suites follow, and TLS 1.2 keeps all
+   its defaults (curl adds them), so every server is still reached */
+static void tls_prefs(CURL *c) {
+#if defined(SB_ANDROIDTV)
+#if defined(__arm__)
+  int on = 1;
+#else
+  static int on = -1; if (on < 0) on = getenv("SB_CHACHA") != NULL; /* (development: the 64-bit build tried with it) */
+#endif
+  if (on) f_easy_setopt(c, CURLOPT_TLS13_CIPHERS, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384");
+#else
+  (void)c;
+#endif
+}
 static CURL *thread_handle(int *keep) {
   *keep = f_easy_reset != NULL;
 #ifdef SB_TPK
@@ -182,7 +197,7 @@ static void perform(Req *r) {
   f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 8L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
   f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 8000L); f_easy_setopt(c, CURLOPT_TIMEOUT_MS, r->timeoutMs > 0 ? r->timeoutMs : 20000L);
   f_easy_setopt(c, CURLOPT_USERAGENT, ua()); if (!r->size) f_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
-  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
   if (r->size) { f_easy_setopt(c, CURLOPT_TIMEOUT_MS, 10000L); f_easy_setopt(c, CURLOPT_HEADERFUNCTION, on_header); f_easy_setopt(c, CURLOPT_HEADERDATA, r); f_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_size_data); hs = f_slist_append(hs, "Range: bytes=0-0"); }
   /* one header per line; one the caller names (User-Agent...) replaces curl's own */
   for (char *h = r->hdr, *nl; h && *h; h = nl ? nl + 1 : NULL) { nl = strchr(h, '\n'); if (nl) *nl = 0; if (*h) hs = f_slist_append(hs, h); if (nl) *nl = '\n'; }
@@ -369,7 +384,7 @@ unsigned char *net_fetch_sync_hdr(const char *url, const char *hdr, size_t *len,
   f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 8L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
   f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 8000L); f_easy_setopt(c, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
   f_easy_setopt(c, CURLOPT_USERAGENT, ua()); f_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
-  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
   CURLcode rc = f_easy_perform(c); long code = 0, nc = 0; f_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code); f_easy_getinfo(c, CURLINFO_NUM_CONNECTS, &nc);
   __atomic_add_fetch(&fetchN, 1, __ATOMIC_RELAXED); if (nc > 0) __atomic_add_fetch(&fetchNew, 1, __ATOMIC_RELAXED);
   thread_handle_done(c, keep);
@@ -392,7 +407,7 @@ int net_stream_sync(const char *url, int timeoutMs, NetSink sink, void *ud) {
   f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 8L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
   f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 8000L); f_easy_setopt(c, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
   f_easy_setopt(c, CURLOPT_USERAGENT, ua()); /* no Accept-Encoding: the bytes counted are the bytes that crossed the line */
-  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
   CURLcode rc = f_easy_perform(c); long code = 0; f_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code); f_easy_cleanup(c); if (pin) f_slist_free_all(pin); log_fail(rc, url);
   if (x.stopped) return -1;
   return rc == CURLE_OK ? (int)code : 0;
@@ -416,7 +431,7 @@ int net_pipe_sync(const char *url, const char *headers, int head, NetHdrSink hs,
   f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); /* a User-Agent among the headers replaces it */
   if (head) f_easy_setopt(c, CURLOPT_NOBODY, 1L);
   if (sl) f_easy_setopt(c, CURLOPT_HTTPHEADER, sl);
-  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
   CURLcode rc = f_easy_perform(c); long code = 0; f_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code); f_easy_cleanup(c); if (sl) f_slist_free_all(sl); free(hd); if (pin) f_slist_free_all(pin); log_fail(rc, url);
   if (x.stopped) return -1;
   return rc == CURLE_OK ? (int)code : 0;
@@ -459,7 +474,7 @@ static int range_once(NetRange *h, const char *url, long long start, long len, u
   f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 5L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
   f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 8000L); f_easy_setopt(c, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
   f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); f_easy_setopt(c, CURLOPT_TCP_KEEPALIVE, 1L);
-  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+  if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
   CURLcode rc = f_easy_perform(c); if (pin) { f_easy_setopt(c, CURLOPT_RESOLVE, (struct curl_slist *)NULL); f_slist_free_all(pin); } /* (a kept-alive handle: no list left behind it) */ log_fail(rc, url);
   if (httpStatus) *httpStatus = r.status;
   if (total) *total = r.total;
@@ -504,7 +519,7 @@ int net_range_multi(NetRange *h, const char *url, const long long *st, const lon
     f_easy_setopt(c, CURLOPT_URL, direct ? h->eff : url); f_easy_setopt(c, CURLOPT_RANGE, rg); struct curl_slist *pin = ts_pin(c, url);
     f_easy_setopt(c, CURLOPT_HEADERFUNCTION, multi_hdr); f_easy_setopt(c, CURLOPT_HEADERDATA, &m); f_easy_setopt(c, CURLOPT_WRITEFUNCTION, multi_data); f_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     f_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L); f_easy_setopt(c, CURLOPT_MAXREDIRS, 5L); f_easy_setopt(c, CURLOPT_NOSIGNAL, 1L); f_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 8000L); f_easy_setopt(c, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
-    f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); f_easy_setopt(c, CURLOPT_TCP_KEEPALIVE, 1L); if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath);
+    f_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (Web0S; Linux) StremioOrigin"); f_easy_setopt(c, CURLOPT_TCP_KEEPALIVE, 1L); if (caPath[0]) f_easy_setopt(c, CURLOPT_CAINFO, caPath); tls_prefs(c);
     CURLcode rc = f_easy_perform(c); if (pin) { f_easy_setopt(c, CURLOPT_RESOLVE, (struct curl_slist *)NULL); f_slist_free_all(pin); }
     if (httpStatus) *httpStatus = m.status;
     if (direct && !pass && (rc != CURLE_OK || (m.status >= 400 && m.status != 416 && m.status != 429))) { free(m.buf); led_drop(url); free(h->eff); h->eff = NULL; direct = 0; continue; } /* (where the link led stopped answering: through the link again) */

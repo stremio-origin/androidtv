@@ -284,16 +284,66 @@ static void still_check(void) {
 static void rec_keep(void) { /* this frame's batches become the last frame's */
   RecB *tb = prvB; prvB = recB; recB = tb; int t = prvCapB; prvCapB = recCapB; recCapB = t; prvNB = recNB; recNB = 0;
   Vtx *tv = prvV; prvV = recV; recV = tv; t = prvCapV; prvCapV = recCapV; recCapV = t; prvNV = recNV; recNV = 0; prvClear = recClear; }
-/* what differs from the last frame, as a box in layout units (r): 0 nothing, 1 a part, -1 too much to tell (all of it) */
-static int rec_diff(float *r) {
+/* what differs from the last frame, as up to MAXB boxes in layout units: 0 nothing, 1 some, -1 too much to tell (all of it).
+   Changes far apart stay apart (the top bar's light and a card lower down are two small boxes, not one over the page) */
+#define MAXB 4
+static void box_add(float (*bx)[4], int *nb, const float *r) {
+  if (r[2] < r[0] || r[3] < r[1]) return;
+  if (*nb < MAXB * 2) { memcpy(bx[(*nb)++], r, sizeof(float) * 4); return; }
+  int best = 0; float grow = 1e30f; /* (full: into the box it grows least) */
+  for (int i = 0; i < *nb; i++) { float u0 = fminf(bx[i][0], r[0]), u1 = fminf(bx[i][1], r[1]), u2 = fmaxf(bx[i][2], r[2]), u3 = fmaxf(bx[i][3], r[3]);
+    float g = (u2 - u0) * (u3 - u1) - (bx[i][2] - bx[i][0]) * (bx[i][3] - bx[i][1]); if (g < grow) { grow = g; best = i; } }
+  bx[best][0] = fminf(bx[best][0], r[0]); bx[best][1] = fminf(bx[best][1], r[1]); bx[best][2] = fmaxf(bx[best][2], r[2]); bx[best][3] = fmaxf(bx[best][3], r[3]); }
+static void box_merge(float (*bx)[4], int *nb) { /* boxes that touch or overlap made one; then the closest pairs until MAXB are left */
+  for (int again = 1; again; ) { again = 0;
+    for (int i = 0; i < *nb && !again; i++) for (int j = i + 1; j < *nb && !again; j++) {
+      float *a = bx[i], *b = bx[j]; int touch = a[0] <= b[2] + 8 && b[0] <= a[2] + 8 && a[1] <= b[3] + 8 && b[1] <= a[3] + 8;
+      float u0 = fminf(a[0], b[0]), u1 = fminf(a[1], b[1]), u2 = fmaxf(a[2], b[2]), u3 = fmaxf(a[3], b[3]);
+      float waste = (u2 - u0) * (u3 - u1) - (a[2] - a[0]) * (a[3] - a[1]) - (b[2] - b[0]) * (b[3] - b[1]);
+      if (touch || *nb > MAXB) { if (!touch) { /* (too many: only the pair wasting least) */
+          float bw = 1e30f; int bi = -1, bj = -1; for (int x = 0; x < *nb; x++) for (int y = x + 1; y < *nb; y++) { float *p = bx[x], *q = bx[y];
+            float w = (fmaxf(p[2], q[2]) - fminf(p[0], q[0])) * (fmaxf(p[3], q[3]) - fminf(p[1], q[1])) - (p[2] - p[0]) * (p[3] - p[1]) - (q[2] - q[0]) * (q[3] - q[1]); if (w < bw) { bw = w; bi = x; bj = y; } }
+          a = bx[bi]; b = bx[bj]; u0 = fminf(a[0], b[0]); u1 = fminf(a[1], b[1]); u2 = fmaxf(a[2], b[2]); u3 = fmaxf(a[3], b[3]); i = bi; j = bj; }
+        (void)waste; bx[i][0] = u0; bx[i][1] = u1; bx[i][2] = u2; bx[i][3] = u3; memmove(bx[j], bx[j + 1], sizeof(float) * 4 * (size_t)(*nb - j - 1)); (*nb)--; again = 1; } } } }
+static int rec_diff(float (*bx)[4], int *nb) {
+  *nb = 0;
   if (!lastOk || texGen != lastGen || recClear != prvClear || recNB != prvNB) { still.why[!lastOk ? 0 : texGen != lastGen ? 1 : recClear != prvClear ? 2 : 3]++; return -1; }
   int any = 0;
   for (int i = 0; i < recNB; i++) { RecB *a = &recB[i], *b = &prvB[i]; const Vtx *va = recV + a->first, *vb = prvV + b->first;
-    if (a->prog != b->prog || a->tex != b->tex || a->opaque != b->opaque || a->hole != b->hole || memcmp(a->sc, b->sc, sizeof a->sc) || a->n != b->n) { vbox(va, a->n, r); vbox(vb, b->n, r); any = 1; continue; }
+    if (a->prog != b->prog || a->tex != b->tex || a->opaque != b->opaque || a->hole != b->hole || memcmp(a->sc, b->sc, sizeof a->sc) || a->n != b->n) {
+      float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(va, a->n, r); box_add(bx, nb, r); float q[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(vb, b->n, q); box_add(bx, nb, q); any = 1; continue; }
     if (!memcmp(va, vb, sizeof(Vtx) * a->n)) continue;
-    for (int q = 0; q + 6 <= a->n; q += 6) if (memcmp(va + q, vb + q, sizeof(Vtx) * 6)) { vbox(va + q, 6, r); vbox(vb + q, 6, r); any = 1; } }
+    for (int k = 0; k + 6 <= a->n; k += 6) if (memcmp(va + k, vb + k, sizeof(Vtx) * 6)) { float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; vbox(va + k, 6, r); vbox(vb + k, 6, r); box_add(bx, nb, r); any = 1; } }
+  box_merge(bx, nb);
+  { static int one = -1; if (one < 0) one = getenv("SB_ONEBOX") != NULL; /* (development: one box around all the changes, as before) */
+    if (one && *nb > 1) { for (int i = 1; i < *nb; i++) { bx[0][0] = fminf(bx[0][0], bx[i][0]); bx[0][1] = fminf(bx[0][1], bx[i][1]); bx[0][2] = fmaxf(bx[0][2], bx[i][2]); bx[0][3] = fmaxf(bx[0][3], bx[i][3]); } *nb = 1; } }
   return any; }
 
+/* the GPU's cost of one full-screen blended layer at w x h, in ms (the best of a few runs, the GPU waited for): what a
+   frame's backdrop, dimming and glass each cost. 0 when it cannot be measured */
+/* how fast pictures go to the GPU here, in KB a millisecond (a 1 MB picture's rows sent into a texture, the GPU waited
+   for, the best of a few): 0 when it cannot be measured */
+double gfx_upload_kb_ms(void) {
+  int W = 512, H = 512; unsigned char *px = malloc((size_t)W * H * 4); if (!px) return 0;
+  for (long i = 0; i < (long)W * H * 4; i++) px[i] = (unsigned char)(i * 31);
+  GLuint t = gfx_tex_create(px, W, H, 4, 1); if (!t) { free(px); return 0; }
+  double best = 1e9;
+  for (int run = 0; run < 4; run++) { glFinish(); Uint64 t0 = SDL_GetPerformanceCounter(); gfx_tex_update(t, px, 0, 0, W, H, 4); glFinish();
+    double ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency(); if (run > 0 && ms < best) best = ms; }
+  gfx_tex_free(t); free(px); return best > 0 && best < 1e9 ? (W * H * 4 / 1024.0) / best : 0;
+}
+double gfx_layer_ms(int w, int h) {
+  GfxTarget t; if (!gfx_target_create(&t, w, h)) return 0;
+  double best = 1e9; const int layers = 4;
+  for (int run = 0; run < 3; run++) { /* (the first warms the driver up: its shaders, the target's memory) */
+    glFinish(); Uint64 t0 = SDL_GetPerformanceCounter();
+    gfx_target_begin(&t, RGBA(20, 18, 28, 255));
+    for (int i = 0; i < layers; i++) { gfx_rect(0, 0, SB_W, SB_H * 2, RGBA(40 + i * 20, 30, 60, 120)); gfx_flush(); }
+    gfx_target_end(); glFinish();
+    double ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency() / layers;
+    if (run > 0 && ms < best) best = ms; }
+  gfx_target_free(&t); return best < 1e9 ? best : 0;
+}
 void gfx_still(int on) { recWant = on; lastOk = 0; }
 void gfx_still_reset(void) { lastOk = 0; still.n = 0; still.resets++; } /* the screen's last frame is gone (a new surface, back from the background): the next is drawn whole */
 int gfx_still_skipped(void) { return recSame; }
@@ -307,10 +357,15 @@ void gfx_still_spill(void) { /* something else uses the GPU now: what is kept is
   if (pv) { memcpy(vtx, pv, sizeof(Vtx) * pn); nvtx = pn; curProg = pp; curTex = pt; batchOpaque = po; free(pv); } }
 void gfx_end(void) {
   gfx_flush();
-  if (recOn) { recOn = 0; float r[4] = { 1e9f, 1e9f, -1e9f, -1e9f }; int d = rec_diff(r), p[4];
-    if (d == 0) { recSame = 1; still.kept++; } /* the last frame again: nothing drawn */
-    else if (d > 0 && screenFbo && px_rect(r, p) && (double)p[2] * p[3] < 0.6 * surfW * surfH) { rec_replay_in(p); still_check(); frameFull = 0; memcpy(frameRect, p, sizeof p); still.part++; still.partArea += (double)p[2] * p[3] / ((double)surfW * surfH); }
-    else if (d > 0 && !px_rect(r, p)) { recSame = 1; still.kept++; } /* (changes all off the screen) */ /* (a part only into a picture of our own: the window's buffer does not keep its pixels) */
+  if (recOn) { recOn = 0; float bx[MAXB * 2][4]; int nb = 0, d = rec_diff(bx, &nb), P[MAXB][4], np = 0; double area = 0;
+    for (int i = 0; i < nb; i++) if (px_rect(bx[i], P[np])) { area += (double)P[np][2] * P[np][3]; np++; }
+    if (d == 0 || (d > 0 && !np)) { recSame = 1; still.kept++; } /* the last frame again (or changes all off the screen): nothing drawn */
+    else if (d > 0 && screenFbo && area < 0.6 * surfW * surfH) { /* (a part only into a picture of our own: the window's buffer does not keep its pixels) */
+      for (int i = 0; i < np; i++) rec_replay_in(P[i]);
+      still_check(); frameFull = 0;
+      int x0 = P[0][0], y0 = P[0][1], x1 = P[0][0] + P[0][2], y1 = P[0][1] + P[0][3]; /* (the copy to the screen: the box around them all) */
+      for (int i = 1; i < np; i++) { if (P[i][0] < x0) x0 = P[i][0]; if (P[i][1] < y0) y0 = P[i][1]; if (P[i][0] + P[i][2] > x1) x1 = P[i][0] + P[i][2]; if (P[i][1] + P[i][3] > y1) y1 = P[i][1] + P[i][3]; }
+      frameRect[0] = x0; frameRect[1] = y0; frameRect[2] = x1 - x0; frameRect[3] = y1 - y0; still.part++; still.partArea += area / ((double)surfW * surfH); }
     else { if (d > 0) still.why[4]++; rec_replay_in(NULL); frameFull = 1; still.whole++; }
     rec_keep(); lastGen = texGen; lastOk = 1; still.frames++; }
   else { frameFull = 1; if (recSpilled) { lastOk = 0; recNB = 0; recNV = 0; } if (recWant) { still.whole++; still.frames++; } } /* (drawn as it came: nothing to compare the next one with) */

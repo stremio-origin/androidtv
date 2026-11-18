@@ -22,6 +22,9 @@
 #define STBI_NO_PNM
 #define STBI_NO_GIF
 #include "stb_image.h"
+#ifdef SB_ANDROIDTV
+unsigned char *atv_jpeg_decode(const unsigned char *data, size_t len, int bw, int bh, int *w, int *h); /* platform/androidtv/plat_atv.c */
+#endif
 #include "ui/palette.h"
 #include "stb_image_write.h"
 #include "src/webp/decode.h"
@@ -229,6 +232,8 @@ static void decode_part(Img *im, unsigned char *data, size_t len, int fromNet, c
   else {
 #if defined(SB_WEBOS) || defined(SB_TIZEN)
     if (!(px = jpeg_scaled(im, data, len, &w, &h)))
+#elif defined(SB_ANDROIDTV)
+    if (!(len >= 4 && data[0] == 0xFF && data[1] == 0xD8 && im->w > 0 && im->h > 0 && (px = atv_jpeg_decode(data, len, im->w, im->h, &w, &h)))) /* (Android's own decoder, at a half, quarter or eighth) */
 #endif
     px = stbi_load_from_memory(data, (int)len, &w, &h, &ch, 4); } /* (a JPEG at a half, quarter or eighth of its size when that still covers its box) */
   if (px && fromNet) { int shownBig = !(im->fit >= 0) && (long)im->w * im->h > 1280L * 720; /* (no small copy is kept for those) */
@@ -380,7 +385,10 @@ int img_loaded(const char *url) { Img *im = find(url, fnv(url)); return im && im
 #else
 #define UP_BUDGET (320L * 1024) /* this TV converts ~100 KB a millisecond for its GPU: ~3 ms a frame */
 #endif
+static long upBudget = UP_BUDGET; /* (Android TV: measured on the box at the start, img_set_upload_budget) */
+void img_set_upload_budget(long bytes) { if (bytes > 0) upBudget = bytes; }
 #define UP_URGENT (768L * 1024) /* a backdrop: in a few frames, as before (its fade waits for the whole picture) */
+static long upUrgent(void) { return upBudget * 2 > UP_URGENT ? upBudget * 2 : UP_URGENT; } /* (a backdrop: never less than the steady rate) */
 static int upLog = -1; /* SB_UPLOG: each upload's size and time (development) */
 static void up_log(const char *what, long bytes, Uint64 t0) { if (upLog < 0) upLog = getenv("SB_UPLOG") != NULL; if (!upLog) return; double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency(); fprintf(stderr, "[up] %s %ld KB %.1f ms\n", what, bytes / 1024, ms); }
 static Img *upCur;
@@ -397,17 +405,17 @@ void img_pump(void) {
   /* a poster (540 KB) goes up whole in a frame (about 5 ms on the TV) instead of in two halves, and with the remote at
      rest about two can (a bigger burst made the next move stutter on a 2-core 1 GB box): up to ~90 a second, not 24 */
   extern float app_idle(void); static int burst = -1; if (burst < 0) burst = !getenv("SB_UPBURST") || atoi(getenv("SB_UPBURST")); /* (SB_UPBURST=0: a platform whose GPU takes pictures slowly keeps the steady rate) */
-  long BUD = burst && app_idle() > 0.4f ? UP_BUDGET * 5 / 2 : UP_BUDGET;
-  if (upCur) { if (!upCur->wantTex) { gfx_tex_recycle(upCur->upTex, upCur->pw, upCur->ph, upCur->pch, 1); upCur->upTex = 0; free(upCur->px); upCur->px = NULL; upCur->state = 0; upCur = NULL; } else { sent += up_band(upCur, upCur->urgent ? UP_URGENT : UP_BUDGET); if (upCur) return; } }
+  long BUD = burst && app_idle() > 0.4f ? upBudget * 5 / 2 : upBudget;
+  if (upCur) { if (!upCur->wantTex) { gfx_tex_recycle(upCur->upTex, upCur->pw, upCur->ph, upCur->pch, 1); upCur->upTex = 0; free(upCur->px); upCur->px = NULL; upCur->state = 0; upCur = NULL; } else { sent += up_band(upCur, upCur->urgent ? upUrgent() : upBudget); if (upCur) return; } }
   Uint64 t0 = SDL_GetPerformanceCounter(); double hz = (double)SDL_GetPerformanceFrequency();
   for (int n = 0; n < 6 && sent < BUD; n++) {
-    if (sent && (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / hz > (BUD > UP_BUDGET ? 8.0 : 6.0)) return; /* first uploads also allocate: time counts too */
+    if (sent && (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / hz > (BUD > upBudget ? 8.0 : 6.0)) return; /* first uploads also allocate: time counts too */
     pthread_mutex_lock(&mu); Img *im = done_pop(); pthread_mutex_unlock(&mu);
     if (!im) return;
     if (im->px && (im->tex || !im->wantTex)) { free(im->px); im->px = NULL; continue; } /* a reload for the colours only, or nobody draws it */
     if (!im->px) continue;
     long bytes = (long)im->pw * im->ph * im->pch;
-    long cap = im->urgent ? UP_URGENT : BUD;
+    long cap = im->urgent ? upUrgent() : BUD;
     if (bytes <= cap - sent || (!sent && bytes <= cap * 2)) { sent += bytes; Uint64 u0 = SDL_GetPerformanceCounter(); im->upTex = gfx_tex_create(im->px, im->pw, im->ph, im->pch, 1); up_log("whole", bytes, u0); up_done(im); continue; }
     if (sent) { pthread_mutex_lock(&mu); done_push(im); pthread_mutex_unlock(&mu); return; } /* next frame, first */
     { Uint64 u0 = SDL_GetPerformanceCounter(); im->upTex = gfx_tex_create(NULL, im->pw, im->ph, im->pch, 1); up_log("alloc", bytes, u0); } im->upRow = 0; upCur = im; up_band(im, cap); return;
@@ -416,17 +424,20 @@ void img_pump(void) {
 void img_release_unused(int keepMb) {
   long keep = keepMb > 0 ? (long)keepMb * 1024 * 1024 : budgetBytes;
   if (usedBytes <= keep) return;
-  /* drop the least recently used textures until under the budget; keep what was drawn in the last few frames */
-  for (int pass = 0; pass < 8 && usedBytes > keep; pass++) {
-    unsigned oldest = 0xffffffffu;
-    for (int b = 0; b < BUCKETS; b++) for (Img *i = table[b]; i; i = i->next) if (i->tex && !i->pin && i->lastUse < oldest) oldest = i->lastUse;
-    if (oldest == 0xffffffffu) return;
-    if (frameNo - oldest < (pass < 4 ? 120u : 3u)) { if (pass < 4 && usedBytes > keep + keep / 8) { pass = 3; continue; } return; } /* what was on screen in the last 2 s stays (a step back never reloads it); a real overflow (an eighth over) takes what was not drawn in the last 3 frames: before, that step was never reached once all were that recent, and a fast scroll went to 67 of 40 MB (Android TV's stress loops) */
-    for (int b = 0; b < BUCKETS; b++) for (Img *i = table[b]; i; i = i->next)
-      if (i->tex && !i->pin && i->lastUse <= oldest + 30) { gfx_tex_recycle(i->tex, i->pw, i->ph, i->pch, 1); i->tex = 0; usedBytes -= i->bytes; i->bytes = 0; i->evictAt = mono_s(); stEvict++;
-        /* loaded again (from its small copy) only when it is asked for again: queueing it at once made a loop under
-           memory pressure (decode, upload, evict, decode...) that filled the queue, and a new backdrop could not get in */
-        i->state = 2; i->wantTex = 0; }
+  /* the least recently drawn texture let go, one at a time, until under the budget (a whole half-second of them at once
+     overshot: a little over the budget, every picture of that slice went, and a step back asked for them again); what
+     was on screen in the last 2 s stays (a step back never reloads it) unless a real overflow (an eighth over) needs it,
+     then all but the last 3 frames' */
+  int strict = 0;
+  for (int n = 0; n < 64 && usedBytes > keep; n++) {
+    Img *o = NULL;
+    for (int b = 0; b < BUCKETS; b++) for (Img *i = table[b]; i; i = i->next) if (i->tex && !i->pin && (!o || i->lastUse < o->lastUse)) o = i;
+    if (!o) return;
+    if (frameNo - o->lastUse < (strict ? 3u : 120u)) { if (!strict && usedBytes > keep + keep / 8) { strict = 1; n--; continue; } return; }
+    gfx_tex_recycle(o->tex, o->pw, o->ph, o->pch, 1); o->tex = 0; usedBytes -= o->bytes; o->bytes = 0; o->evictAt = mono_s(); stEvict++;
+    /* loaded again (from its small copy) only when it is asked for again: queueing it at once made a loop under
+       memory pressure (decode, upload, evict, decode...) that filled the queue, and a new backdrop could not get in */
+    o->state = 2; o->wantTex = 0;
   }
 }
 void img_cover_uv(float ta, float ba, int top, float *u0, float *v0, float *u1, float *v1) {

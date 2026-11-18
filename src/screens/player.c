@@ -200,7 +200,6 @@ int player_page_under(void) { return P.open && (P.in.v < 0.999f || (sx_flying() 
 int player_live(void) { extern int app_bg_video(void); return (P.open && P.live && !P.closing && P.artA.v < 0.02f) || app_bg_video(); } /* (or the boards' background trailer) */
 static int paused(void) { return video_state() == VID_PAUSED; }
 static int awayHold; /* (#69) a film paused because the app went behind another app: held paused until the app is in front, or a play is asked (a phone's) */
-int player_controls_up(void) { return P.open && !P.closing && P.live && (P.osd || P.mode != 0); } /* a film playing with its controls, a tray or a panel over it */
 int player_paused(void) { return P.open && !P.closing && P.live && paused(); } /* (the app's screensaver may come over a paused film) */
 static double dur(void) { return video_duration(); }
 /* a live broadcast (a channel, a match): no end to count down to, so the bar says LIVE instead of the time left */

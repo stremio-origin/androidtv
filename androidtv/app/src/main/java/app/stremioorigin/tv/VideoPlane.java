@@ -101,11 +101,17 @@ public final class VideoPlane {
             .setEnableDecoderFallback(true);
         builtDts = dtsMode;
         /* the buffer from the box's memory: a 1 GB box keeps less ahead than a 4 GB one (the torrent engine has its own) */
-        long memMb = 0; try { android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
-            ((android.app.ActivityManager) a.getSystemService(android.content.Context.ACTIVITY_SERVICE)).getMemoryInfo(mi); memMb = mi.totalMem / (1024 * 1024); } catch (Throwable e) { }
-        int bufMb = memMb > 0 && memMb < 1300 ? 12 : memMb < 2600 ? 32 : 64;   /* (a 1 GB box has ~150 MB for the whole app; the torrent window is on flash) */
+        long memMb = 0, freeMb = -1; try { android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+            ((android.app.ActivityManager) a.getSystemService(android.content.Context.ACTIVITY_SERVICE)).getMemoryInfo(mi); memMb = mi.totalMem / (1024 * 1024);
+            freeMb = (mi.availMem - mi.threshold) / (1024 * 1024); } catch (Throwable e) { }
+        /* as much as the box can spare: a remux at 40-60 Mbit/s needs tens of MB to ride out a slow second (12 MB was two
+           seconds of it). The size for the box's memory, then no more than what is free now, less the system's own low
+           mark and room for the video decoder */
+        int tierMb = memMb > 0 && memMb < 1300 ? 64 : memMb < 2600 ? 128 : memMb < 4600 ? 256 : 384;
+        int reserveMb = 240;   /* (the player is made once, before the film is known: room for a 4K decoder always) */
+        int bufMb = freeMb < 0 ? (memMb > 0 && memMb < 1300 ? 12 : memMb < 2600 ? 32 : 64) : (int) Math.max(12, Math.min(tierMb, freeMb - reserveMb));
         int bufBytes = bufMb * 1024 * 1024;
-        MainActivity.log("[video] player buffer " + bufMb + " MB (" + memMb + " MB of RAM)");
+        MainActivity.log("[video] player buffer " + bufMb + " MB (" + memMb + " MB of RAM, " + freeMb + " MB free)");
         DefaultLoadControl lc = new DefaultLoadControl.Builder()
             .setBufferDurationsMs(bufMb <= 12 ? 8000 : 15000, bufMb <= 12 ? 20000 : 50000, 1500, 3000).setTargetBufferBytes(bufBytes).setPrioritizeTimeOverSizeThresholds(false).build();
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
@@ -114,6 +120,13 @@ public final class VideoPlane {
         DefaultMediaSourceFactory msf = new DefaultMediaSourceFactory(new DefaultDataSource.Factory(a, http), new MkvSeekHead.Factory(ex)); /* (Matroska: an index listed in a second SeekHead found too) */
         player = new ExoPlayer.Builder(a, rf).setTrackSelector(selector).setLoadControl(lc).setMediaSourceFactory(msf)
             .setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS).build();
+        /* what the logs need to tell a stutter's cause: the decoder (a box's own, or software), frames dropped (the decoder or
+           the box too slow), and each wait for data once the picture runs (the source too slow) */
+        player.addAnalyticsListener(new androidx.media3.exoplayer.analytics.AnalyticsListener() {
+            @Override public void onVideoDecoderInitialized(EventTime t, String name, long initializedMs, long initMs) { MainActivity.log("[video] decoder " + name + " (ready in " + initMs + " ms)"); }
+            @Override public void onDroppedVideoFrames(EventTime t, int dropped, long elapsedMs) { droppedFilm += dropped; MainActivity.log("[video] " + dropped + " frames dropped in " + elapsedMs + " ms (" + droppedFilm + " this film)"); }
+            @Override public void onPlaybackStateChanged(EventTime t, int st) { if (st == androidx.media3.common.Player.STATE_BUFFERING && firstFrame == 1) MainActivity.log("[video] waiting for data at " + (t.currentPlaybackPositionMs / 100) / 10.0 + " s (" + (player != null ? player.getTotalBufferedDuration() : 0) + " ms buffered)"); }
+        });
         player.setVideoSurfaceView(view);
         /* a film takes the sound (another app's sound pauses it, a call or the assistant ducks it); headphones or a
            receiver going away pauses it */
@@ -214,7 +227,7 @@ public final class VideoPlane {
 
     /* ---- calls from the native side (any thread) ---- */
     public static void load(final String url, final long startMs, final boolean isLive) {
-        state = 1; firstFrame = 0; hasMedia = 1; error = ""; hdr = ""; vw = vh = 0; pos = startMs; dur = 0; buf = 0; unsup = 0; seeking = 0; changed = 1;
+        droppedFilm = 0; state = 1; firstFrame = 0; hasMedia = 1; error = ""; hdr = ""; vw = vh = 0; pos = startMs; dur = 0; buf = 0; unsup = 0; seeking = 0; changed = 1;
         audioLines = ""; textLines = ""; audioCur = -1; wantPlay = true; live = isLive;
         MainActivity.keepScreen(true);
         run(() -> {
@@ -295,6 +308,7 @@ public final class VideoPlane {
        in 1080p) whose refresh rate is the film's or a whole multiple of it (23.976 at 23.976 / 47.95, 25 at 50, ...);
        nothing when the screen already fits it or has no such mode. The mode the app found is restored when the film
        ends. Android 6 and up. ---- */
+    private static long droppedFilm; /* (frames dropped since this film was loaded: the log) */
     private static int savedMode = -1;
     private static void matchMode(final float fps, final int height) {
         if (android.os.Build.VERSION.SDK_INT < 23 || fps <= 1) return;

@@ -42,7 +42,6 @@ typedef struct { char name[96]; double s, e; } PlayerChapter;
 extern void (*player_chapters_hook)(const char *url, int p2p);
 void player_chapters(const char *url, const PlayerChapter *list, int n);
 int  player_paused(void);
-int  player_controls_up(void);    /* a film playing with its controls, a tray or a panel over it */
 /* cast: the next play's subtitles as sent (n 0: none), a play at a moment (pos 0: where it was left), the phone's
    commands (1 pause, 2 resume, 3 seek to pos, 4 stop) and the state it is told (0 idle, 1 loading, 2 playing, 3 paused, 4 ended, 5 error) */
 void player_next_subs(const char *const *urls, const char *const *langs, int n);
