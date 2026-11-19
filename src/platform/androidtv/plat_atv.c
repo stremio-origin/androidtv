@@ -115,9 +115,9 @@ unsigned char *atv_jpeg_decode(const unsigned char *data, size_t len, int bw, in
   jbyteArray out = (jbyteArray)(*e)->CallStaticObjectMethod(e, atv_class(e, 0), m, in, (jint)bw, (jint)bh);
   (*e)->DeleteLocalRef(e, in); if (!atv_check(e) || !out) { if (out) (*e)->DeleteLocalRef(e, out); return NULL; }
   unsigned char *px = NULL; jsize n = (*e)->GetArrayLength(e, out); unsigned char hd[8];
-  if (n >= 8) { (*e)->GetByteArrayRegion(e, out, 0, 8, (jbyte *)hd);
+  if (n >= 8) { (*e)->GetByteArrayRegion(e, out, n - 8, 8, (jbyte *)hd); /* (the size after the pixels: MainActivity.decodeJpeg) */
     int ow = hd[0] | hd[1] << 8 | hd[2] << 16 | hd[3] << 24, oh = hd[4] | hd[5] << 8 | hd[6] << 16 | hd[7] << 24;
-    if (ow > 0 && oh > 0 && (long)n == 8 + (long)ow * oh * 4 && (px = malloc((size_t)ow * oh * 4))) { (*e)->GetByteArrayRegion(e, out, 8, ow * oh * 4, (jbyte *)px); *w = ow; *h = oh;
+    if (ow > 0 && oh > 0 && (long)n == 8 + (long)ow * oh * 4 && (px = malloc((size_t)ow * oh * 4))) { (*e)->GetByteArrayRegion(e, out, 0, ow * oh * 4, (jbyte *)px); *w = ow; *h = oh;
       static int said; if (!said) { said = 1; fprintf(stderr, "[img] jpeg: Android's own decoder, scaled (first: %dx%d for a %dx%d box)\n", ow, oh, bw, bh); } } }
   (*e)->DeleteLocalRef(e, out); return px;
 }

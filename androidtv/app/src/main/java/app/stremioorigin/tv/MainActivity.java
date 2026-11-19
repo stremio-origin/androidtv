@@ -457,7 +457,7 @@ public class MainActivity extends SDLActivity {
 
     /* a JPEG by Android's own decoder (the box's libjpeg-turbo, NEON), at a half, quarter or eighth of its size when that
        still covers w x h: much less work than the whole picture decoded and then shrunk (src: img.c). Returned as
-       {width, height (4 bytes each, little-endian), then the RGBA pixels}, or null (the app's own decoder then) */
+       {the RGBA pixels, then width and height (4 bytes each, little-endian)}, or null (the app's own decoder then) */
     public static byte[] decodeJpeg(byte[] data, int w, int h) {
         try {
             android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options(); o.inJustDecodeBounds = true;
@@ -468,10 +468,14 @@ public class MainActivity extends SDLActivity {
             android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, o); if (b == null) return null;
             int bw = b.getWidth(), bh = b.getHeight();
             if (b.getConfig() != android.graphics.Bitmap.Config.ARGB_8888 || b.getRowBytes() != bw * 4) { b.recycle(); return null; }
-            byte[] out = new byte[8 + bw * bh * 4];
-            b.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(out, 8, bw * bh * 4)); b.recycle();   /* (ARGB_8888 is R, G, B, A in memory) */
-            out[0] = (byte) bw; out[1] = (byte) (bw >> 8); out[2] = (byte) (bw >> 16); out[3] = (byte) (bw >> 24);
-            out[4] = (byte) bh; out[5] = (byte) (bh >> 8); out[6] = (byte) (bh >> 16); out[7] = (byte) (bh >> 24);
+            /* the pixels first, the size after them: the buffer handed to Android starts at the array's first byte. (Android 9
+               and older, AOSP b/130390512: copyPixelsToBuffer into a buffer starting further in released the pointer at its
+               start instead of the array's, and the runtime freed it as if a copy: "Invalid address passed to free", then a
+               crash, on every Android TV 5-9 since 1.1.2) */
+            int px = bw * bh * 4; byte[] out = new byte[px + 8];
+            b.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(out)); b.recycle();   /* (ARGB_8888 is R, G, B, A in memory) */
+            out[px] = (byte) bw; out[px + 1] = (byte) (bw >> 8); out[px + 2] = (byte) (bw >> 16); out[px + 3] = (byte) (bw >> 24);
+            out[px + 4] = (byte) bh; out[px + 5] = (byte) (bh >> 8); out[px + 6] = (byte) (bh >> 16); out[px + 7] = (byte) (bh >> 24);
             return out;
         } catch (Throwable t) { return null; }
     }

@@ -333,11 +333,14 @@ public final class VideoPlane {
                still goes to the 4K mode, at the box's own rate); "seamless only" changes the rate only where the screen does
                it without going blank (the present mode's alternative rates) */
             float[] seamless = null;
-            if (known && android.os.Build.VERSION.SDK_INT >= 31) try { android.hardware.display.DisplayManager dm = (android.hardware.display.DisplayManager) a.getSystemService(android.content.Context.DISPLAY_SERVICE);
+            if (android.os.Build.VERSION.SDK_INT >= 31) try { android.hardware.display.DisplayManager dm = (android.hardware.display.DisplayManager) a.getSystemService(android.content.Context.DISPLAY_SERVICE);
                 int pref = dm != null ? dm.getMatchContentFrameRateUserPreference() : android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_UNKNOWN;
                 if (pref == android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_NEVER) { known = false; locked = true; }
                 else if (pref == android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_SEAMLESSS_ONLY) seamless = cur.getAlternativeRefreshRates(); } catch (Throwable t) { }
             if (!up && (!known || fits(curHz, fps))) return;
+            /* a film file (not live, not HLS or DASH: those streams are often 50 or 60 fps when they do not say) */
+            String u = lastUrl != null ? lastUrl.toLowerCase(java.util.Locale.ROOT) : "";
+            boolean fileFilm = !live && !u.contains(".m3u8") && !u.contains(".mpd") && !u.contains("/hls") && !u.contains("/dash");
             int bestScore = -1;
             for (android.view.Display.Mode m : d.getSupportedModes()) {
                 int h = Math.min(m.getPhysicalWidth(), m.getPhysicalHeight()); float hz = m.getRefreshRate();
@@ -348,7 +351,7 @@ public final class VideoPlane {
                 /* fitting the film first (its lowest multiple); a 4K film whose rate the file does not say: a cinema rate (nearly
                    every such film is 23.976 or 24, and the TV's 4K at 24 needs less of the HDMI link than at 60), unless the TV's
                    setting keeps the rate; then the box's own rate, then the closest to it */
-                boolean cinema = up && !known && !locked && (fits(hz, 23.976f) || fits(hz, 24f));
+                boolean cinema = up && !known && !locked && fileFilm && hz < 30.5f && (fits(hz, 23.976f) || fits(hz, 24f)); /* (23.976 or 24 Hz itself, never a multiple: a TV with 4K at 60 and 120 kept 60) */
                 int score = fit ? 3000 - Math.round(hz) : cinema ? 2500 - Math.round(hz) : Math.abs(hz - curHz) < 0.5f ? 2000 : 1000 - Math.round(Math.abs(hz - curHz) * 10);
                 if (score > bestScore) { bestScore = score; best = m; }
             }
