@@ -284,8 +284,12 @@ int img_init(const char *dir) {
   for (int i = 0; i < WORKERS; i++) { pthread_t t; pthread_create(&t, NULL, worker, (void *)(intptr_t)i); pthread_detach(t); }
   return 1;
 }
-static float drawScale = 1.0f;
-void img_set_draw_scale(float sc) { drawScale = sc > 0 && sc < 1 ? sc : 1.0f; }
+static float drawScale = 1.0f; static int hidpiOK;
+/* a platform drawing above 1080 (Android TV's 4K pages) lets pictures decode above their layout size too; elsewhere
+   (the LG TV, the Mac preview's Retina) a scale above 1 stays 1, as before */
+void img_allow_hidpi(int on) { hidpiOK = on; }
+int img_hidpi(void) { return hidpiOK && drawScale >= 1.5f; }
+void img_set_draw_scale(float sc) { drawScale = sc > 0 && (sc < 1 || hidpiOK) ? sc : 1.0f; }
 void img_set_budget_mb(int mb) { budgetBytes = (long)mb * 1024 * 1024; }
 int img_budget_mb(void) { return (int)(budgetBytes / (1024 * 1024)); }
 void img_queue_stats(int *queued, int *waiting) { pthread_mutex_lock(&mu); *queued = qn; *waiting = dn; pthread_mutex_unlock(&mu); }
@@ -312,7 +316,7 @@ static Img *request_as(const char *key, const char *src, int w, int h, int fit, 
     if (!im->wantTex) { im->wantTex = 1; if (im->state == 2 && !im->tex && !im->px) { if (im->evictAt > 0 && mono_s() - im->evictAt < 10) stRe++; im->askAt = mono_s(); im->state = 0; enqueue(im); } } /* it was loaded for its colours only (or let go): now load it to draw */
     return im; }
   if (pfMode && usedBytes > budgetBytes * 9 / 10) return NULL; /* a look-ahead never crowds out what is on screen */
-  if (drawScale < 1) { w = (int)(w * drawScale + 0.999f); h = (int)(h * drawScale + 0.999f); radius *= drawScale; }
+  if (drawScale != 1) { w = (int)(w * drawScale + 0.999f); h = (int)(h * drawScale + 0.999f); radius *= drawScale; }
   im = calloc(1, sizeof *im); im->url = strdup(key); im->src = key == src ? im->url : strdup(src); im->hash = hs; im->w = w; im->h = h; im->fit = fit; im->radius = radius; im->lastUse = frameNo; im->askAt = mono_s();
   im->wantTex = 1; im->pfOnly = pfMode;
   im->next = table[hs % BUCKETS]; table[hs % BUCKETS] = im;

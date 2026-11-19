@@ -73,7 +73,7 @@ static void on_account(const char *ak, const char *userJson) {
 }
 static void on_pref(const char *k, const char *v) { static double saidAt = -10; if (settings_apply_pref(k, v) && !player_open() && app_now() - saidAt > 3) { saidAt = app_now(); toast(T("Settings updated from your phone"), 2000, NULL); } } /* (once for a phone's settings sent together: each one changed had its own toast, nine at a connect) */ /* (one short notice, no key cap before it; none while a title plays: the change shows itself, the subtitles moving or changing) */
 static void on_pairing(const char *code) { snprintf(codeNow, sizeof codeNow, "%s", code); }
-static void on_connected(int n) { static int was; if (n > was && !player_open()) btr_cast_hold(20); /* a phone just connected: its play comes next, no trailer flashes before it */ if (n > was) toast(T("Phone connected"), 2500, NULL); else if (n < was && !n) toast(T("Phone disconnected"), 2500, NULL); was = n; }
+static void on_connected(int n) { static int was; if (n > was && !player_open()) btr_cast_hold(20); /* a phone just connected: its play comes next, no trailer flashes before it */ if (!player_open()) { if (n > was) toast(T("Phone connected"), 2500, NULL); else if (n < was && !n) toast(T("Phone disconnected"), 2500, NULL); } was = n; } /* (none while a film plays: a phone put away or locked closes its connection, normal use, not news) */
 
 void castlink_start(void) {
   static CastHooks h; const char *dn = plat_device_name();

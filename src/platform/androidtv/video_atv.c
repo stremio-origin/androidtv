@@ -29,6 +29,7 @@ static void load_now(const char *u, double startSec) {
   /* (every load at full volume, as webOS gives each new media: the one player here kept the last one's, and a film
      opened after the home screen's trailer faded out played at volume 0, silent) */
   { const char *d = store_get("dtsMode", "auto"); vcall_i("setDts", !strcmp(d, "convert") ? 1 : !strcmp(d, "off") ? 2 : 0); }   /* Settings › Audio › DTS sound */
+  { extern int player_open(void); vcall_i("setFilm", player_open() ? 1 : 0); } /* (a film: the TV's mode may follow it and its 4K track is taken; the home screen's trailer: neither, the screen never blinks for it) */
   JNIEnv *e = atv_env(); jmethodID m = atv_method(e, VP, "load", "(Ljava/lang/String;JZ)V"); if (!m) return;
   jstring s = (*e)->NewStringUTF(e, u); (*e)->CallStaticVoidMethod(e, atv_class(e, VP), m, s, (jlong)(startSec * 1000), (jboolean)(liveSrc != 0)); atv_check(e); (*e)->DeleteLocalRef(e, s);
   memset(&V, 0, sizeof V); V.st = VID_LOADING; vErr[0] = vHdr[0] = 0;

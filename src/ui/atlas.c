@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_PAGES 10
-static int maxPages = MAX_PAGES; /* (6 on a box with little memory: atlas_low_memory) */
+#define MAX_PAGES 24
+static int maxPages = 10; /* (6 on a box with little memory: atlas_low_memory; 24 for pages drawn at 4K: atlas_hidpi) */
 #define MAX_SHELVES 96
 typedef struct { int y, h, x; } Shelf;
 typedef struct { GLuint tex; int nshelf, top, live; unsigned gen, lastUse; int sx, sy; Shelf shelf[MAX_SHELVES]; } Page;
@@ -34,6 +34,7 @@ static void put_px(int page, unsigned char *px, int x, int y, int w, int h) { /*
 
 void atlas_frame(void) { frameNo++; }
 void atlas_low_memory(void) { maxPages = 6; }
+void atlas_hidpi(void) { maxPages = MAX_PAGES; } /* (text at twice the size takes four times the room: Android TV's 4K pages, a 3 GB+ box) */
 /* pages not drawn for idleFrames let go (all but the first): their lines are made again when next shown (their slots
    no longer valid). For Android's memory warnings and the background */
 int atlas_trim(unsigned idleFrames) {

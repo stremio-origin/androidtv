@@ -31,6 +31,8 @@ void   img_release_unused(int keepMb);   /* evicts least recently drawn textures
 void   img_set_budget_mb(int mb);
 void   img_log_stats(void);          /* one [img] line: fetches and new connections, where decodes came from, thrash, the on-screen wait */
 void   img_set_draw_scale(float s);      /* surface pixels per layout unit when below 1: pictures are decoded at the size really drawn */
+void   img_allow_hidpi(int on);         /* a platform drawing above 1080 (Android TV 4K pages): a scale above 1 is used too */
+int    img_hidpi(void);                 /* pictures decoded at twice the layout size or more (pick sources that large) */
 int    img_used_mb(void);
 /* computes cover-crop uv for drawing a texture of aspect `ta` into a box of aspect `ba`, anchored at the top (posters) or centre */
 void   img_cover_uv(float ta, float ba, int anchorTop, float *u0, float *v0, float *u1, float *v1);

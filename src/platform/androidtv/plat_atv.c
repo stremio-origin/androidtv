@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -54,11 +55,20 @@ const char *plat_log_header(void) {
 
 /* stderr to the system log (adb logcat -s StremioOrigin), line by line; the app's own kept log gets every line too */
 static int logPipe[2];
+/* the start's own log (<files>/data/laststart.txt, begun by Java at each open): every line of the first 256 KB, written
+   at once, so a start that dies or gives up in its first seconds leaves its lines for the next open to show
+   (MainActivity: StartReport) */
+int atvStartFd = -1;
+static void start_write(const char *s, size_t n) { static size_t total; if (atvStartFd < 0 || total > 256 * 1024) return; total += n; if (write(atvStartFd, s, n) < 0) { } }
 static void *log_thread(void *a) { (void)a; char buf[2048]; size_t n = 0; ssize_t r;
   while ((r = read(logPipe[0], buf + n, sizeof buf - 1 - n)) > 0) { n += (size_t)r; buf[n] = 0; char *s = buf, *e;
-    while ((e = strchr(s, '\n'))) { *e = 0; __android_log_write(ANDROID_LOG_INFO, "StremioOrigin", s); s = e + 1; }
-    n = strlen(s); memmove(buf, s, n + 1); if (n >= sizeof buf - 1) { __android_log_write(ANDROID_LOG_INFO, "StremioOrigin", buf); n = 0; } }
+    while ((e = strchr(s, '\n'))) { *e = 0; __android_log_write(ANDROID_LOG_INFO, "StremioOrigin", s); start_write(s, strlen(s)); start_write("\n", 1); s = e + 1; }
+    n = strlen(s); memmove(buf, s, n + 1); if (n >= sizeof buf - 1) { __android_log_write(ANDROID_LOG_INFO, "StremioOrigin", buf); start_write(buf, n); start_write("\n", 1); n = 0; } }
   return NULL; }
+/* a crash: what is still in the pipe goes straight to the start's log (the log thread dies with the process) */
+void atv_crash_drain(void) {
+  if (atvStartFd < 0) return; int fl = fcntl(logPipe[0], F_GETFL); if (fl >= 0) fcntl(logPipe[0], F_SETFL, fl | O_NONBLOCK);
+  char b[4096]; ssize_t r; while ((r = read(logPipe[0], b, sizeof b)) > 0) start_write(b, (size_t)r); }
 
 /* ---- calls into Java (MainActivity's static methods) ---- */
 JNIEnv *atv_env(void) { return (JNIEnv *)SDL_AndroidGetJNIEnv(); }
@@ -155,6 +165,7 @@ void plat_pre_init(const char *appId) { (void)appId;
   info(ATV_FILES, files, sizeof files); info(ATV_CACHE, cache, sizeof cache); info(ATV_LIBDIR, libs, sizeof libs);
   snprintf(assetDir, sizeof assetDir, "%s/assets", files); snprintf(dataDir, sizeof dataDir, "%s/data", files);
   { char cmd[1100]; snprintf(cmd, sizeof cmd, "%s", dataDir); mkdir(cmd, 0700); }
+  { char p[1100]; snprintf(p, sizeof p, "%s/laststart.txt", dataDir); atvStartFd = open(p, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600); }
   applog_start(dataDir); logReady = 1; /* as early as the data folder is known: Java's answers below (the decoders, the screen) are kept too */
   /* the libraries the app loads by name (the torrent engine) sit in the app's native folder: the working folder, so
      the core finds them as it does beside the TV's binary (SDL has no base path on Android) */

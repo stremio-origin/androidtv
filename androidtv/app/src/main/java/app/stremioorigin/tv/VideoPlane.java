@@ -227,6 +227,9 @@ public final class VideoPlane {
     }
 
     /* ---- calls from the native side (any thread) ---- */
+    /* what the next load is (video_atv.c, before each load): a film the player opened (1), or the home screen's trailer (0) */
+    private static volatile boolean film;
+    public static void setFilm(int on) { film = on != 0; }
     public static void load(final String url, final long startMs, final boolean isLive) {
         lastUrl = url; freed = false;
         droppedFilm = 0; state = 1; firstFrame = 0; hasMedia = 1; error = ""; hdr = ""; vw = vh = 0; pos = startMs; dur = 0; buf = 0; unsup = 0; seeking = 0; changed = 1;
@@ -235,7 +238,13 @@ public final class VideoPlane {
         run(() -> {
             ensure(); if (player == null) { state = 6; error = "no player"; return; }
             /* no subtitle of the file's own until the app picks one (a track flagged "default" was shown by itself) */
-            selector.setParameters(selector.buildUponParameters().clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true));
+            DefaultTrackSelector.Parameters.Builder pb = selector.buildUponParameters().clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true);
+            /* a film's stream with several sizes (HLS, DASH): its largest the decoder plays, not only up to the screen's
+               present mode (Media3's default: a box running its menus at 1080p never took a 4K track; the TV's mode then
+               follows the film, matchMode). The trailer stays within the screen's mode */
+            MainActivity a = MainActivity.self;
+            if (film) pb.clearViewportSizeConstraints(); else if (a != null) pb.setViewportSizeToPhysicalDisplaySize(a, true);
+            selector.setParameters(pb);
             MediaItem.Builder b = new MediaItem.Builder().setUri(Uri.parse(url));
             if (isLive) b.setLiveConfiguration(new MediaItem.LiveConfiguration.Builder().build());
             player.setVolume(volTarget / 100f);
@@ -306,30 +315,50 @@ public final class VideoPlane {
     }
     public static String text(int what) { return what == 0 ? error : hdr; }
 
-    /* ---- the TV's mode follows the film (frame-rate matching): a mode at the same size or the film's own (a 4K film on a box
-       in 1080p) whose refresh rate is the film's or a whole multiple of it (23.976 at 23.976 / 47.95, 25 at 50, ...);
-       nothing when the screen already fits it or has no such mode. The mode the app found is restored when the film
-       ends. Android 6 and up. ---- */
+    /* ---- the TV's mode follows the film: a 4K film on a box in 1080p goes to the screen's 4K mode (its refresh rate the
+       film's or a whole multiple of it when the screen has one, else the rate the box runs at now, else the closest), so
+       it is shown in 4K, also when the file does not say its frame rate; a film whose rate the screen's mode does not fit
+       goes to a mode of the same size that fits (23.976 at 23.976 / 47.95, 25 at 50, ...). Nothing when the screen
+       already fits it or has no such mode. The mode the app found is restored when the film ends. Android 6 and up ---- */
     private static long droppedFilm; /* (frames dropped since this film was loaded: the log) */
     private static int savedMode = -1;
     private static void matchMode(final float fps, final int height) {
-        if (android.os.Build.VERSION.SDK_INT < 23 || fps <= 1) return;
+        if (android.os.Build.VERSION.SDK_INT < 23 || !film) return; /* (the home screen's trailer never changes the TV's mode) */
         ui.post(() -> {
             MainActivity a = MainActivity.self; if (a == null) return;
             android.view.Display d = a.getWindowManager().getDefaultDisplay(); android.view.Display.Mode cur = d.getMode(), best = null;
-            int want = Math.max(Math.min(cur.getPhysicalWidth(), cur.getPhysicalHeight()), height > 1080 ? 2160 : 0);
-            if (fits(cur.getRefreshRate(), fps) && Math.min(cur.getPhysicalWidth(), cur.getPhysicalHeight()) >= want) return;
+            int curH = Math.min(cur.getPhysicalWidth(), cur.getPhysicalHeight()), want = Math.max(curH, height > 1080 ? 2160 : 0);
+            boolean known = fps > 1, up = want > curH, locked = false; float curHz = cur.getRefreshRate();
+            /* the TV's own "match content frame rate" setting (Android 12 and up): "never" leaves the rate alone (a 4K film
+               still goes to the 4K mode, at the box's own rate); "seamless only" changes the rate only where the screen does
+               it without going blank (the present mode's alternative rates) */
+            float[] seamless = null;
+            if (known && android.os.Build.VERSION.SDK_INT >= 31) try { android.hardware.display.DisplayManager dm = (android.hardware.display.DisplayManager) a.getSystemService(android.content.Context.DISPLAY_SERVICE);
+                int pref = dm != null ? dm.getMatchContentFrameRateUserPreference() : android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_UNKNOWN;
+                if (pref == android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_NEVER) { known = false; locked = true; }
+                else if (pref == android.hardware.display.DisplayManager.MATCH_CONTENT_FRAMERATE_SEAMLESSS_ONLY) seamless = cur.getAlternativeRefreshRates(); } catch (Throwable t) { }
+            if (!up && (!known || fits(curHz, fps))) return;
+            int bestScore = -1;
             for (android.view.Display.Mode m : d.getSupportedModes()) {
-                int h = Math.min(m.getPhysicalWidth(), m.getPhysicalHeight());
-                if (!fits(m.getRefreshRate(), fps) || (h != want && h != Math.min(cur.getPhysicalWidth(), cur.getPhysicalHeight()))) continue;
-                if (best == null || (h == want && Math.min(best.getPhysicalWidth(), best.getPhysicalHeight()) != want) || m.getRefreshRate() < best.getRefreshRate()) best = m;
+                int h = Math.min(m.getPhysicalWidth(), m.getPhysicalHeight()); float hz = m.getRefreshRate();
+                if (h != want) continue;
+                boolean fit = known && fits(hz, fps);
+                if (!up && !fit) continue;   /* (the same size: only for a rate that fits) */
+                if (!up && seamless != null && !inRates(seamless, hz)) continue;   /* ("seamless only": a rate the screen changes to without a blank) */
+                /* fitting the film first (its lowest multiple); a 4K film whose rate the file does not say: a cinema rate (nearly
+                   every such film is 23.976 or 24, and the TV's 4K at 24 needs less of the HDMI link than at 60), unless the TV's
+                   setting keeps the rate; then the box's own rate, then the closest to it */
+                boolean cinema = up && !known && !locked && (fits(hz, 23.976f) || fits(hz, 24f));
+                int score = fit ? 3000 - Math.round(hz) : cinema ? 2500 - Math.round(hz) : Math.abs(hz - curHz) < 0.5f ? 2000 : 1000 - Math.round(Math.abs(hz - curHz) * 10);
+                if (score > bestScore) { bestScore = score; best = m; }
             }
             if (best == null || best.getModeId() == cur.getModeId()) return;
             if (savedMode < 0) savedMode = cur.getModeId();
             android.view.WindowManager.LayoutParams lp = a.getWindow().getAttributes(); lp.preferredDisplayModeId = best.getModeId(); a.getWindow().setAttributes(lp);
-            MainActivity.log("[video] screen mode " + best.getPhysicalWidth() + "x" + best.getPhysicalHeight() + " @ " + best.getRefreshRate() + " Hz for a " + fps + " fps film");
+            MainActivity.log("[video] screen mode " + best.getPhysicalWidth() + "x" + best.getPhysicalHeight() + " @ " + best.getRefreshRate() + " Hz for a " + height + "p film at " + (known ? fps + " fps" : "an unknown frame rate") + " (was " + curH + "p @ " + curHz + " Hz)");
         });
     }
+    private static boolean inRates(float[] rates, float hz) { for (float r : rates) if (Math.abs(r - hz) < 0.01f) return true; return false; }
     private static boolean fits(float hz, float fps) { float k = hz / fps; return Math.abs(k - Math.round(k)) < 0.01f && Math.round(k) >= 1; }
     private static void restoreMode() {
         if (savedMode < 0) return; final int id = savedMode; savedMode = -1;

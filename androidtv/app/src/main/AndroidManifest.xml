@@ -71,6 +71,12 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- the last start died in its first seconds: its log on the screen (StartReport) -->
+        <activity
+            android:name="app.stremioorigin.tv.StartReport"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
         <!-- Fire TV: the app can be opened from a phone over DIAL (res/xml/whisperplay.xml) -->
         <meta-data android:name="whisperplay" android:resource="@xml/whisperplay" />
         <!-- the downloaded update, read by the system's installer (ApkProvider) -->

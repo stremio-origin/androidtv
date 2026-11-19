@@ -1,7 +1,7 @@
 /* Text: FreeType rasterising, HarfBuzz shaping, FriBidi ordering. A line of text is shaped and
    drawn once into an alpha texture and kept in a cache keyed by its text, size, weight and
    width limit; drawing a cached line is one quad. Inter is the UI face; Arabic script falls
-   back to Noto Sans Arabic per run, so mixed lines (an Arabic title with a Latin name) work.
+   back to Cairo (Noto Sans Arabic for letters Cairo lacks) per run, so mixed lines (an Arabic title with a Latin name) work.
    Anything else (emoji, symbols, CJK, Korean, Hebrew, Thai, Indic...) takes the first system font
    that has it, per cluster (the TV's /usr/share/fonts, macOS's fonts in the preview), mapped on
    first need; emoji are drawn monochrome in the text colour, flags as a country-code tag, and a

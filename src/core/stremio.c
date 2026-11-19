@@ -414,10 +414,13 @@ int sb_search_defs(const char *q, CatalogDef *out, int max) {
 }
 
 /* ---- pictures ------------------------------------------------------------------------------ */
+/* pages drawn at 4K (Android TV on a strong box, img_hidpi): each picture from a source twice as wide, so it is not
+   stretched; everywhere else the sizes as before */
+static int pic_hidpi(void) { extern int img_hidpi(void); return img_hidpi(); }
 const char *sb_poster_of(const Item *it, char *buf, size_t cap) { if (getenv("SB_POSTER_FAIL")) { snprintf(buf, cap, "https://invalid.invalid/poster/%s.jpg", it->id); return buf; } /* (development: every poster fails, to see the stand-ins) */
   if (it->poster[0]) { copy_str(buf, cap, it->poster);
     if (find_in(buf, "images.metahub.space/poster/")) { replace_in(buf, cap, "/poster/small/", "/poster/medium/"); replace_in(buf, cap, "/poster/large/", "/poster/medium/"); /* small is WebP; medium is JPEG */ }
-    else if (find_in(buf, "image.tmdb.org/t/p/")) { const char *k[] = { "/t/p/w500/", "/t/p/w780/", "/t/p/w1280/", "/t/p/original/" }; for (int i = 0; i < 4; i++) replace_in(buf, cap, k[i], "/t/p/w342/"); }
+    else if (find_in(buf, "image.tmdb.org/t/p/")) { const char *k[] = { "/t/p/w500/", "/t/p/w780/", "/t/p/w1280/", "/t/p/original/" }; for (int i = 0; i < 4; i++) replace_in(buf, cap, k[i], "/t/p/w342/"); if (pic_hidpi()) replace_in(buf, cap, "/t/p/w342/", "/t/p/w500/"); } /* (a card ~460 px wide at 4K; Metahub's medium is 500 wide already) */
     return buf; }
   if (sb_is_imdb(it->id)) { snprintf(buf, cap, "https://images.metahub.space/poster/medium/%s/img", it->id); return buf; }
   buf[0] = 0; return buf;
@@ -431,10 +434,12 @@ static const char *bg_of(const Item *it, char *buf, size_t cap) {
 const char *sb_bg_small(const Item *it, char *buf, size_t cap) { bg_of(it, buf, cap); /* a card's backdrop: Metahub's small one (480x270, ~12 KB, against ~600 KB for the 1920x1080 medium: the reference app's choice for cards; the disk cache keeps fifty times more of them) */
   if (find_in(buf, "images.metahub.space/background/")) { const char *k[] = { "/background/medium/", "/background/large/" }; for (int i = 0; i < 2; i++) replace_in(buf, cap, k[i], "/background/small/"); }
   else if (find_in(buf, "image.tmdb.org/t/p/")) { const char *k[] = { "/t/p/w300/", "/t/p/w500/", "/t/p/w1280/", "/t/p/original/" }; for (int i = 0; i < 4; i++) replace_in(buf, cap, k[i], "/t/p/w780/"); }
+  if (pic_hidpi()) { replace_in(buf, cap, "/background/small/", "/background/medium/"); replace_in(buf, cap, "/t/p/w780/", "/t/p/w1280/"); } /* (a card 920 px wide at 4K) */
   return buf; }
 const char *sb_bg_mid(const Item *it, char *buf, size_t cap) { bg_of(it, buf, cap);
   if (find_in(buf, "images.metahub.space/background/")) { const char *k[] = { "/background/small/", "/background/large/" }; for (int i = 0; i < 2; i++) replace_in(buf, cap, k[i], "/background/medium/"); }
   else if (find_in(buf, "image.tmdb.org/t/p/")) replace_in(buf, cap, "/t/p/original/", "/t/p/w1280/");
+  if (pic_hidpi()) replace_in(buf, cap, "/t/p/w1280/", "/t/p/original/"); /* (the whole screen's backdrop, 3840 wide where TMDB has it; Metahub's largest is 1920) */
   return buf; }
 const char *sb_logo_of(const Item *it, char *buf, size_t cap) { if (it->logo[0]) copy_str(buf, cap, it->logo); else if (sb_is_imdb(it->id)) snprintf(buf, cap, "https://images.metahub.space/logo/medium/%s/img", it->id); else buf[0] = 0; return buf; }
 /* "2h 10min", "130 min", "1 h 5 m" (a year or a year span is not a count of minutes) */
@@ -1006,7 +1011,7 @@ static void stream_part_done(StreamPart *p) {
 static void on_streams(int st, const unsigned char *b, size_t n, void *ud) {
   StreamPart *p = ud; StreamReq *r = p->req;
   if (!r->cancelled) { cJSON *j = st == 200 ? net_json(b) : NULL;
-    if (st != 200 || !j) fprintf(stderr, "[addon] streams from %s: %s\n", p->name, st == 200 ? "not JSON" : st > 0 ? "HTTP error" : "no answer");
+    if (st != 200 || !j) { if (st > 0 && st != 200) fprintf(stderr, "[addon] streams from %s: HTTP error %d\n", p->name, st); else fprintf(stderr, "[addon] streams from %s: %s\n", p->name, st == 200 ? "not JSON" : "no answer"); } /* (the code says why: refused, not found, the server's own failure) */
     streams_answer(p, js_arr(j, "streams")); net_json_free(j); }
   stream_part_done(p);
 }

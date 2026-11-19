@@ -37,6 +37,21 @@ public class MainActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        /* the last start died or gave up in its first seconds (its mark still there) and left its own log: that log on
+           the screen first (StartReport), so whoever sees it can photograph it; the next open is a normal (safe) start */
+        File data = new File(getFilesDir(), "data"); data.mkdirs();
+        File mark = new File(data, "starting.java"), last = new File(data, "laststart.txt"); /* (data/starting is the native part's own: there, it makes the next start a safe one) */
+        if ((mark.exists() || new File(data, "starting").exists()) && last.length() > 0) {
+            File shown = new File(data, "laststart.shown.txt"); shown.delete();
+            if (last.renameTo(shown)) {
+                super.onCreate(savedInstanceState);
+                startActivity(new android.content.Intent(this, StartReport.class));
+                finish(); return; } }
+        startFile = last; last.delete();
+        try { FileOutputStream o = new FileOutputStream(mark); o.write("java\n".getBytes("UTF-8")); o.close(); } catch (Throwable e) { }
+        startLog("[java] open " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).format(new java.util.Date()) + " · " + appVersion(this));
+        startLog("[java] " + Build.MANUFACTURER + " " + Build.MODEL + " · Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ") · " + Build.DISPLAY);
+        startLog("[java] ABIs " + java.util.Arrays.toString(Build.SUPPORTED_ABIS) + " · libraries " + getApplicationInfo().nativeLibraryDir);
         self = this;
         crashWatch(this);
         /* development: the app's test settings as the TV build takes them from its environment
@@ -315,6 +330,15 @@ public class MainActivity extends SDLActivity {
        logs have them; before the app's library is loaded, the system log only ---- */
     static native void nativeLog(String s);
     static void log(String s) { try { nativeLog(s); } catch (Throwable e) { android.util.Log.i("StremioOrigin", s); } }
+    /* the start's own log (data/laststart.txt): Java's lines before the app's native part runs; native appends its own */
+    static File startFile;
+    static synchronized void startLog(String s) {
+        android.util.Log.i("StremioOrigin", s); File f = startFile; if (f == null) return;
+        try (FileOutputStream o = new FileOutputStream(f, true)) { o.write((s + "\n").getBytes("UTF-8")); } catch (Throwable e) { }
+    }
+    static String appVersion(Context c) {
+        try { android.content.pm.PackageInfo i = c.getPackageManager().getPackageInfo(c.getPackageName(), 0); return "version " + i.versionName + " (" + i.versionCode + ")"; } catch (Throwable e) { return "version ?"; }
+    }
 
     /* a Java crash: its kind and where, straight into the kept log (data/applog.log, as the app writes it: the next
        Share logs shows it under "the last crash"), then Android's own handling. No message: it may hold an address */
@@ -332,6 +356,7 @@ public class MainActivity extends SDLActivity {
                     if (x != e) b.append(ts).append(" [crash] caused by ").append(x.getClass().getName()).append('\n');
                     for (StackTraceElement el : x.getStackTrace()) { if (n++ >= 14) break; b.append(ts).append(" [crash] at ").append(el.getClassName()).append('.').append(el.getMethodName()).append(':').append(el.getLineNumber()).append('\n'); } }
                 b.append(ts).append(" [crash] end\n"); o.write(b.toString().getBytes("UTF-8"));
+                File sf = startFile; if (sf != null) try (FileOutputStream so = new FileOutputStream(sf, true)) { so.write(b.toString().getBytes("UTF-8")); } catch (Throwable ignored) { }
             } catch (Throwable ignored) { }
             if (prev != null) prev.uncaughtException(t, e); else System.exit(2);
         });
@@ -460,13 +485,31 @@ public class MainActivity extends SDLActivity {
             android.os.Process.killProcess(android.os.Process.myPid());
         });
     }
-    /* SB_RES (development) first, then what the app measured on this box last time, then the box's memory */
+    /* the drawing size: 1080 lines everywhere, 720 only on the really cheap boxes (2 cores or fewer and about 512 MB of
+       memory: under 700 MB told), the TV's display hardware scaling it. SB_RES (development) decides instead. (The GPU
+       measure and its kept answer, data/drawsize, are gone: everything else looked soft at 720) */
     private int drawLines() {
-        try { String r = android.system.Os.getenv("SB_RES"); if (r != null) return r.equals("720") ? 720 : 1080; } catch (Throwable t) { }
-        try { File f = new File(getFilesDir(), "data/drawsize"); if (f.exists()) { byte[] b = new byte[64]; int n; try (FileInputStream in = new FileInputStream(f)) { n = in.read(b); }
-                String v = n > 0 ? new String(b, 0, n).trim() : ""; if (v.startsWith("720")) return 720; if (v.startsWith("1080")) return 1080; } } catch (Throwable t) { }
-        try { ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(mi);
-            if (mi.totalMem > 0 && mi.totalMem < 1500L * 1024 * 1024) return 720; } catch (Throwable t) { }
+        try { String r = android.system.Os.getenv("SB_RES"); if (r != null) return r.equals("720") ? 720 : r.equals("2160") ? 2160 : 1080; } catch (Throwable t) { }
+        new File(getFilesDir(), "data/drawsize").delete();
+        long mem = 0; int cores = Runtime.getRuntime().availableProcessors();
+        try { ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo(); ((ActivityManager) getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(mi); mem = mi.totalMem; } catch (Throwable t) { }
+        try (FileInputStream in = new FileInputStream("/sys/devices/system/cpu/present")) { byte[] b = new byte[32]; int n = in.read(b); String v = n > 0 ? new String(b, 0, n).trim() : "";   /* ("0-3": every core, also those asleep, which availableProcessors leaves out) */
+            int d = v.lastIndexOf('-'); if (d >= 0) cores = Math.max(cores, Integer.parseInt(v.substring(d + 1).trim()) + 1); } catch (Throwable t) { }
+        boolean cheap = cores <= 2 && mem > 0 && mem < 700L * 1024 * 1024;
+        if (cheap) { log("[start] " + cores + " cores, " + (mem >> 20) + " MB: drawing at 720 (a really cheap box)"); return 720; }
+        /* a 4K screen in its 4K mode, on a strong box (4 cores or more, about 3 GB or more: 2.5 GB told), whose GPU this app
+           measured at 4K (data/ui4k "2160", from a start before: the native part measures once, SB_UI4K_TEST): the
+           pages drawn at 3840x2160, sharp on the panel instead of scaled from 1080 */
+        int panel = 0;
+        try { if (Build.VERSION.SDK_INT >= 23) { Display.Mode m = ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay().getMode(); panel = Math.min(m.getPhysicalWidth(), m.getPhysicalHeight()); } } catch (Throwable t) { }
+        boolean strong = cores >= 4 && mem >= 2500L * 1024 * 1024; String k = "";
+        File kf = new File(getFilesDir(), "data/ui4k");
+        try (FileInputStream in = new FileInputStream(kf)) { byte[] b = new byte[16]; int n = in.read(b); k = n > 0 ? new String(b, 0, n).trim() : ""; } catch (Throwable t) { }
+        if (panel >= 2160 && strong) {
+            if (k.equals("2160")) { log("[start] " + cores + " cores, " + (mem >> 20) + " MB, a 4K screen: drawing at 2160 (this GPU measured fast enough)"); return 2160; }
+            if (k.isEmpty()) try { android.system.Os.setenv("SB_UI4K_TEST", "1", true); } catch (Throwable t) { }
+        }
+        log("[start] " + cores + " cores, " + (mem >> 20) + " MB, screen mode " + panel + " lines: drawing at 1080" + (panel >= 2160 && strong && k.isEmpty() ? " (the GPU measured at 4K this start, for the next)" : ""));
         return 1080;
     }
     /* the drawing surface's size, fixed (the TV scales it to the screen): 1080 or 720 lines (src: plat_window_size) */
@@ -484,30 +527,30 @@ public class MainActivity extends SDLActivity {
 
     /* ---- files ---- */
     /* the app reads its fonts, dictionaries and icons as files: copied out of the APK once per version */
+    /* the app's own files (the APK's assets/), copied out once per install: read from the APK itself, never through
+       AssetManager.list, which also lists the system's assets (Fire OS has its own); a file that fails is skipped and
+       said, the rest still copied, and the stamp only written when all came through */
     private void copyAssets() {
         File dst = new File(getFilesDir(), "assets"), stamp = new File(dst, ".version");
         String ver = "";
         try { ver = String.valueOf(getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime); } catch (Exception e) { }
-        try {
-            if (stamp.exists() && ver.equals(new String(readAll(new FileInputStream(stamp)), "UTF-8"))) return;
-            copyDir(getAssets(), "", dst);
-            FileOutputStream o = new FileOutputStream(stamp); o.write(ver.getBytes("UTF-8")); o.close();
-        } catch (IOException e) { MainActivity.log("assets: " + e); }
-    }
-    private static void copyDir(AssetManager am, String path, File dst) throws IOException {
-        String[] names = am.list(path);
-        if (names == null || names.length == 0) {
-            if (path.isEmpty()) return;
-            dst.getParentFile().mkdirs();
-            InputStream in = am.open(path); FileOutputStream out = new FileOutputStream(dst);
-            byte[] b = new byte[65536]; int n; while ((n = in.read(b)) > 0) out.write(b, 0, n);
-            in.close(); out.close(); return;
-        }
-        dst.mkdirs();
-        for (String n : names) {
-            if (path.isEmpty() && (n.equals("images") || n.equals("webkit") || n.equals("geoid_map"))) continue;   /* the system's own */
-            copyDir(am, path.isEmpty() ? n : path + "/" + n, new File(dst, n));
-        }
+        try { if (stamp.exists() && ver.equals(new String(readAll(new FileInputStream(stamp)), "UTF-8")) && new File(dst, "fonts/InterVariable.ttf").length() > 0) { startLog("[java] assets: already copied"); return; } } catch (Throwable e) { }
+        int ok = 0, bad = 0; long t0 = System.currentTimeMillis(); byte[] b = new byte[65536];
+        try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(getApplicationInfo().sourceDir)) {
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> en = z.entries();
+            while (en.hasMoreElements()) {
+                java.util.zip.ZipEntry e = en.nextElement(); String n = e.getName();
+                if (e.isDirectory() || !n.startsWith("assets/") || n.contains("..") || n.startsWith("assets/dexopt/")) continue;
+                File out = new File(dst, n.substring(7));
+                try { out.getParentFile().mkdirs();
+                    try (InputStream in = z.getInputStream(e); FileOutputStream o = new FileOutputStream(out)) { int r; while ((r = in.read(b)) > 0) o.write(b, 0, r); }
+                    ok++;
+                } catch (Throwable x) { bad++; if (bad <= 5) startLog("[java] assets: " + n + " not copied: " + x); }
+            }
+        } catch (Throwable x) { bad++; startLog("[java] assets: the APK not readable: " + x); }
+        File font = new File(dst, "fonts/InterVariable.ttf");
+        startLog("[java] assets: " + ok + " copied, " + bad + " failed, " + (System.currentTimeMillis() - t0) + " ms; the font " + (font.length() > 0 ? font.length() + " bytes" : "MISSING"));
+        if (bad == 0) try { FileOutputStream o = new FileOutputStream(stamp); o.write(ver.getBytes("UTF-8")); o.close(); } catch (IOException e) { startLog("[java] assets: stamp " + e); }
     }
     private static byte[] readAll(InputStream in) throws IOException {
         java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream(); byte[] b = new byte[4096]; int n;
@@ -531,6 +574,6 @@ public class MainActivity extends SDLActivity {
             try { android.system.Os.symlink(new File(sys, name).getAbsolutePath(), new File(dir, name).getAbsolutePath()); n++; } catch (Throwable e) { }
             if (n >= 90) break;
         }
-        MainActivity.log("[text] " + n + " system faces linked");
+        startLog("[text] " + n + " system faces linked");
     }
 }
